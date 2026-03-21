@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+*.so
+*.o
+.vscode/
+.idea/
+*.log
+outputs/
+wandb/
