@@ -63,7 +63,7 @@
 | 命令 | 结论 |
 |---|---|
 | **G1** 部署侧文件定位 | ❌ **仍缺**。在 `/home` 全盘 `find`（`navvel_deploy*.yaml` / `navvel_obstacles*.yaml` / `navvel_cbf.py` / `navvel_offline_check.py`）**零命中**；`navvel*` 目录只找到 `navvel_export`。⇒ K6 仍红 |
-| **G6** `eval_ckpt.py` 指标 | ⚠️ **部分可用**：已有 `+runtime_filter=true|false`（= 文档说的 `filter_mode`，ON/OFF 判据可用），并输出 `arrival_rate`/`collision`/`collision_episodes`/`min_clearance`/`success_rate`/end-cause/`reach`(需 `+record_min_rpos=true`)。**但缺** `intervened` 零介入率、`h_min^train`、`Δa` p50/p95、`stall`、`dropped_relevant` ⇒ §4.2/§4.3 的门槛仍无法直接判 |
+| **G6** | `eval_ckpt.py` 指标 | ⚠️ **部分可用**：已有 `+runtime_filter=true|false`（= 文档说的 `filter_mode`，ON/OFF 判据可用），并输出 `arrival_rate`/`collision`/`collision_episodes`/`min_clearance`/`success_rate`/end-cause/`reach`(需 `+record_min_rpos=true`)。**但缺** `intervened` 零介入率、`h_min^train`、`Δa` p50/p95、`stall`、`dropped_relevant` ⇒ §4.2/§4.3 的门槛仍无法直接判。**✅ 2026-09-12 已修（K5）**，见 §0.5.5 |
 | **G11/G12** 三 seed 成绩 | ✅ 已取到，但**口径与文档不同**：`wandb-summary.json` 只有训练内 `eval/stats.*`（soft-respawn 窗口口径），3-seed `success_rate` 均值 **0.4320**（0.4766/0.4229/0.3965），`min_clearance` 均值 0.6363，`collision`=0。文档引用的 **ON 0.891 / OFF 0.855 无留档且不可复现** ⇒ 见 G16 |
 | **口径 A 半径链自检** | ✅ 本地实跑 `omni_drones.utils.cbf`，与本文数值**完全一致**：`A0-legacy` `r_s=r_o+0.20` / `r_cbf=r_o+0.30`；`A` `r_s=r_o+0.12` / `r_cbf=r_o+0.17` |
 
@@ -76,6 +76,51 @@
 | **D-3** | `obs_v3` 取 **SDF+法向 7 维** ⇒ obs = 30+7×12 = **114** |
 | **D-4** | 阶段 1 真机沿用 `arrival@0.2 ≥ 0.85` |
 | **D-5（新增）** | `v1.0.0` 基线 = **补跑 `eval_ckpt.py` 严格单命验收重建**（不用训练内 eval 0.4320） |
+
+### 0.5.5 K5 已完成（2026-09-12）+ v1.0.0 阶段 2 基线实测
+
+**① 指标补齐（K5，修 G6）——已完成 ✅**
+
+| 落点 | 改动 |
+|---|---|
+| `omni_drones/utils/cbf.py::CBFVelocityFilter` | 新增 `shadow`（算 `a_cbf` 但**不写回**动作）与 `record_diag`（逐步攒 `[‖Δa‖, intervened, h_min, fix_norm]`）；**`filter_velocity` 数学未动** |
+| `omni_drones/envs/single/nav_vel_obstacles.py::build_obs` | 暴露 `_obs_win_idx/_obs_win_valid`（滑动窗口选中的槽位）→ 支持 `dropped_relevant` |
+| `scripts/eval_ckpt.py` | `runtime_filter=false` 改挂 **shadow 滤波器**（策略行为 == 撤掉 filter，但仍能量"本会介入多少"）；新增 `_AcceptanceCb` 累加 `arrival@0.2/0.3/0.5`、`stall`、`oob/crash ever`、`dropped_relevant`；`+set_seed` 确定性 + `layout_fp` 布局指纹（验证 ON/OFF 同分布）；输出 `[eval_metrics]` JSON 单行 |
+| **新增** `scripts/acceptance_eval.sh` | 批量评估 runner（`<seed>:<on\|off>:<ckpt>`，可 `PARALLEL=2`） |
+| **新增** `scripts/aggregate_acceptance_eval.py` | 汇总日志 → §4.2/§4.3 表 + 门禁判定 + `eval_metrics.json` |
+| `scripts/cbf_test.py` | 新增 `t9_shadow_diag()`（6 项断言，覆盖 shadow/诊断/逐位兼容） |
+
+**② 评估协议（新增，写死，后续批次必须沿用）**
+
+`512 envs × 600 步`、确定性 `MODE`、`eval_points=fixed`（`[-2.8,0,0.5] → [2.8,0,1.0]`）、
+`set_seed = 1000+train_seed`（ON/OFF 共用 ⇒ 同一套障碍布局）。
+> **显存实测**：`1024×1500` **OOM**；`512×1500` 峰值 26.4 GiB（不能并行）；**`512×600` 峰值 13.6 GiB**
+> ⇒ 可 2 进程并行（6 run 共 1m51s，峰值 28.5 GiB）。
+
+**③ v1.0.0 阶段 2 验收结果：不通过 ❌**（3 seed × ON/OFF，证据见
+`navvel_export/navvel-cfb-v1.0.0-dual-p1-s11/{acceptance.md,eval_metrics.json,eval_logs/}`）
+
+| 门禁 | 门槛 | 实测（3-seed 均值） | 判定 |
+|---|---|---|---|
+| filter 依赖度 `OFF/ON` | ≥ 0.95 | **1.0076** | ✅ PASS |
+| 零介入率 | ≥ 0.95 | **0.1613** | ❌ FAIL |
+| `h_min^train` | ≥ 0 | **−0.0500** | ❌ FAIL |
+| `arrival@0.2`（ON） | ≥ 0.85 | **0.3412** | ❌ FAIL |
+| 0 碰 | 必须 | ON 0 / OFF **1** | ❌ FAIL |
+| 0 OOB | 必须 | 0 | ✅ PASS |
+| `min d_min` | ≥ 0.10 m | 0.0512 | ❌ FAIL |
+| `stall` | ≤ 10% | 0.0132 | ✅ PASS |
+| `dropped_relevant` | < 1% | 0.0000 | ✅ PASS |
+
+> **最重要的解读**：**「依赖度 PASS」≠「可以撤 filter」**。同一次评估里零介入率只有 **0.16**
+> ⇒ 滤波器 **84% 的步都在介入**（`‖Δa‖` 中位 0.64、p95 1.45 m/s，`v_max=1.8`），
+> 但到达率 ON/OFF 在统计上不可区分（差 2.6e−3，标准误 ≈ 2.1%）。
+> 机制：`filter_velocity` 只沿外法向扣除"朝障碍的靠近速度"，**切向（朝目标）进度不受影响**；
+> 在 `cbf_extra=0.10` 的保守球 + 28 障碍下几乎总有约束绑定 ⇒ **介入率虚高但无实效**。
+> ⇒ 这是「滤波器做无用功」，**不是**「策略已内化安全」——正是 **P3** 要治的对象，
+> 也说明 §4.3 必须**同时**看 `依赖度` 与 `零介入率`（本表就是反例）。
+>
+> 另外 `dropped_relevant ≈ 0` ⇒ **A0 未出现 K=8 容量不足**（A3/A4 柱数升到 8 后需重测）。
 
 ---
 
@@ -195,8 +240,10 @@
 | **G13** ✅已修 | **外层 `drones/` 仓库无 git 提交身份**（`user.name`/`user.email` 全未配置，`git commit` 直接失败） | `[fs]` `git config --get` 空 | K1 可执行性；**已设 repo-local 身份 = 与子模块一致（`pink-L`）** |
 | **G14** ✅已修 | `drones/IsaacLab/` = **169 MB、自带 `.git` 的嵌套仓库**，未作为 submodule 登记，永久污染 `git status` | `[fs]` `du -sh`、`IsaacLab/.git` | 版本管理噪音；**已加入 `drones/.gitignore`**；若要钉版本需登记为 submodule |
 | **G15** | **`cfg/algo/ppo.yaml` 不存在，且 git 全历史从未有过**；`algo=ppo` 的超参来自**代码内 ConfigStore**（`omni_drones/learning/ppo/ppo.py:59` `cs.store("ppo", node=PPOConfig, group="algo")`，另有 `ppo_priv`/`ppo_priv_critic`） | `[code]` + `[fs]` find 零命中；`train.py --cfg job` 可组合出 `algo:{name: ppo, train_every: 32, ppo_epochs: 4, num_minibatches: 16, entropy_coef: 0.001, …}` | **训练锚 §2.3 必须含代码 commit**，不能只靠 cfg 快照；`run_config.yaml` 里的 `algo.*` 是解析结果、非来源 |
-| **G16** | **交付成绩 `ON 0.891 / OFF 0.855` 在仓库内无留档，且无法从 wandb 复现**；`wandb-summary.json` 只有训练内窗口 eval（3-seed `success_rate` 均值 **0.4320**，口径与 §4.2/§4.3 验收不同构） | `[fs]` 3 个 run 的 `wandb-summary.json` | **P0.1 判据原文（"3-seed 均值与交付成绩一致"）不可用**；D-5 决定补跑 `eval_ckpt.py` 重建基线 |
+| **G16** | **交付成绩 `ON 0.891 / OFF 0.855` 在仓库内无留档，且无法从 wandb 复现**；`wandb-summary.json` 只有训练内窗口 eval（3-seed `success_rate` 均值 **0.4320**，口径与 §4.2/§4.3 验收不同构） | `[fs]` 3 个 run 的 `wandb-summary.json` | **P0.1 判据原文（"3-seed 均值与交付成绩一致"）不可用**；**✅ 2026-09-12 已按 D-5 重建新基线**（`arrival@0.2` ON **0.3412** / OFF **0.3438**，§0.5.5）—— **旧 0.891/0.855 仍来源不明**（新基线与之不同协议，不可直接比） |
 | **G17** | **`scripts/wandb/` 被 `.gitignore`（OmniDrones/.gitignore:135 `wandb/`）** ⇒ 全部 `checkpoint_final.pt` 只存在于磁盘单点，无备份、无校验清单；一次误删即产物不可恢复 | `[fs]` `git check-ignore -v` | 长期风险；建议对 `_current` 的 ckpt 做外部归档 + 把哈希写进注册表（本轮已写哈希，**归档未做**） |
+| **G18** | `scripts/arena1_layout_check.py`（CPU 单测）**当前必崩**：`torch.as_tensor(task.fixed_init, ...)` 遇到仓库默认 `cfg/task/NavVel.yaml` 的 `fixed_init: null` | `[fs]` 实跑 `TypeError: must be real number, not NoneType` @ line 27 | 与本次改动**无关**（K5 未触碰该文件/该键）；但会让 CPU 回归套件常红 ⇒ 建议加 `None` 守卫或改从 profile 读 |
+| **G19** | **`OmniDrones/.gitignore:150` 忽略 `*.sh`** ⇒ 本仓库内 shell 脚本无法入库（本轮 runner 因此改写为 Python） | `[fs]` `git check-ignore -v` | 后续若需 shell 工具，要么 `git add -f`，要么写 `.py`（已按后者处理） |
 
 ### 1.5 现状的一句话总结
 
@@ -477,7 +524,7 @@ flowchart TD
 | **K2** | `geometry_profile: A`（口径 A）数值冻结并写入 `meta.json` 模板 | P0.2、P1 |
 | **K3** | `M=48`（8 柱×6 层）smoke test 通过（不 OOM、物理不炸），否则定 `n_pillars_range` 上界（G11） | A3 |
 | **K4** | `pillar_layout_check.py` 实现 + CPU 单测通过；`min_corridor` 下界已按 `r_o=0.4243` 算出（G8） | A3/A4 |
-| **K5** | `eval_ckpt.py` 指标扩展完成，并用 `v1.0.0` 回归（旧值可复现）（G6） | P2 起全部验收 |
+| **K5** | `eval_ckpt.py` 指标扩展完成，并用 `v1.0.0` 回归（旧值可复现）（G6）—— **✅ 2026-09-12 已完成**（见 §0.5.5：`shadow` 反事实滤波器 + §4.2/§4.3 全套指标 + `[eval_metrics]` JSON + 批量 runner/汇总器） | 已解除 |
 | **K6** | 部署侧仓库定位 + `navvel_deploy.yaml` 可编辑（G1） | P2、P4、P5 |
 | **K7** | 真机方体障碍实测（中心/边长/高度）与 `navvel_obstacles_*.yaml` 生成 | P2 |
 
@@ -648,8 +695,11 @@ print('r_cbf=', cbf_safety_radius(r_o,0.10,0.02,0.05,1.8,2.0,use_brake_term=Fals
 
 ---
 
-**下一步（立刻可做）**：K1 已完成 ✅（见 §0.5）。接下来
-① 按 **D-5** 补跑 `eval_ckpt.py` 严格单命验收（`+runtime_filter=true` 与 `false` 各一次 + 3 seed），
-重建 `v1.0.0` 的 ON/OFF 基线 —— 这同时把 G16 闭环；
-② 实现 `eval_ckpt.py` 缺失的指标（零介入率 / `h_min^train` / `Δa` p50,p95 / `stall` / `dropped_relevant`）完成 **K5**（G6）；
-③ 然后开 **P0.1**（`A0` 3-seed 复现）。
+**下一步（立刻可做）**：K1 ✅ / K5 ✅ 已完成（见 §0.5）。接下来
+① 开 **P0.1**（`A0` 3-seed 复现）：判据改为「与 §0.5.5 的新基线（`arrival@0.2` ON 0.3412 /
+OFF 0.3438）同协议比对，3-seed 均值在 ±0.02 内」—— 协议参数见 §0.5.5-②，命令见
+`scripts/acceptance_eval.sh`；顺带记录 P0.1 的 `h_min`/零介入率作为 P0.2 的对照；
+② 开 **P0.2**（口径 A，`v1.1.0`）：预期 OFF 列进一步变差、零介入率进一步下降 —— 这正是
+**P3** 的输入；
+③ P0.1/P0.2 开训前建议复跑一次 `export_navvel_actor.py` 对拍（本轮改过 `cbf.py`，
+虽未动 `filter_velocity` 数学，但按 §2.4 红线纪律应留档）。

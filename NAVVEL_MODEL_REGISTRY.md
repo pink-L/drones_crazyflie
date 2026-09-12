@@ -14,7 +14,7 @@
 
 | model_id | 状态 | obs | geometry_profile | 半径链 | arm / p | run group | ckpt sha256（前 12） | 阶段 1 验收 | 阶段 2 验收 |
 |---|---|---|---|---|---|---|---|---|---|
-| `navvel-cfb-v1.0.0-dual-p1-s11` | **现役**（未验收） | obs_v2 / 62 | `A0-legacy` | `r_s=r_o+0.20`、`r_cbf=r_o+0.30` | `dual` / always-on | `run-20260909_191309`（seed 11/12/13） | `4d604d6c30c9` | n/a（旧世界） | **未验收** |
+| `navvel-cfb-v1.0.0-dual-p1-s11` | **现役**（验收不通过） | obs_v2 / 62 | `A0-legacy` | `r_s=r_o+0.20`、`r_cbf=r_o+0.30` | `dual` / always-on | `run-20260909_191309`（seed 11/12/13） | `4d604d6c30c9` | n/a（旧世界） | ✅**已测**：**不通过** ❌ |
 | `navvel-cfb-v1.1.0-dual-p1-s11` | 计划中（P0.2） | obs_v2 / 62 | `A`（口径 A） | `r_s=r_o+0.12`、`r_cbf=r_o+0.17` | `dual` / always-on | 待跑 | — | 待测 | 待测 |
 | `navvel-cfb-v1.2.0-*-s*` | 计划中（P1 = A1a→A4） | obs_v2 / 62 | `A1a`…`A4` | `A` | 待定（沿用 `dual`） | 待跑 | — | 待测 | 待测 |
 | `navvel-cfb-v2.0.0-*-p*-s*` | 计划中（P4 = 1b 红线批） | obs_v3 / 114、K=12 | `A4` + 方体 SDF | `A` | P3 选出的最优臂 | 待跑 | — | 待测 | 待测 |
@@ -36,23 +36,49 @@
 
 ---
 
-## 3. 成绩留档（G12）
+## 3. 成绩留档（G12 / G16）
+
+### 3.1 验收口径基线（2026-09-12 实测，D-5 决策建立）
+
+**协议**：`A0-legacy` profile，512 envs × 600 步，确定性 `MODE`，`eval_points=fixed`
+（起点 `[-2.8,0,0.5]` → 目标 `[2.8,0,1.0]`），`set_seed = 1000+train_seed`（ON/OFF 共用布局）。
+复现：`scripts/acceptance_eval.sh <seed>:<on|off>:<ckpt>` → `scripts/aggregate_acceptance_eval.py`。
+证据：`navvel_export/navvel-cfb-v1.0.0-dual-p1-s11/{eval_metrics.json,eval_logs/}`。
+
+| 指标 | ON（3-seed 均值） | OFF（3-seed 均值） | 门槛（§4.3） | 判定 |
+|---|---|---|---|---|
+| `arrival@0.2` | **0.3412** | **0.3438** | ≥ 0.85 | ❌ FAIL |
+| `arrival@0.5` | 0.3932 | 0.3678 | 记录 | — |
+| **filter 依赖度** `OFF/ON` | — | **1.0076** | ≥ 0.95 | ✅ PASS |
+| **零介入率** | **0.1613** | 0.1951（shadow） | ≥ 0.95 | ❌ FAIL |
+| **`h_min^train`** | **−0.0500** | −0.0500 | ≥ 0 | ❌ FAIL |
+| 碰撞 env 数 | **0** | 0.33（s13 有 1 次） | 必须 0 | ❌ FAIL |
+| OOB env 数 | **0** | **0** | 必须 0 | ✅ PASS |
+| `min d_min`（m） | 0.0512 | 0.0492 | ≥ 0.10 | ❌ FAIL |
+| `stall_frac` | 0.0132 | 0.0217 | ≤ 0.10 | ✅ PASS |
+| `dropped_relevant_frac` | 0.0000 | 0.0000 | < 0.01 | ✅ PASS |
+| `E‖Δa‖` p50 / p95 | 0.6385 / 1.4485 | 0.6974 / 1.5779 | 记录 | — |
+
+> **结论：阶段 2 验收不通过**（0 碰项红 + 3 项门槛红）。详见
+> `navvel_export/navvel-cfb-v1.0.0-dual-p1-s11/acceptance.md`。
+>
+> **关键解读**：filter 依赖度 PASS（1.0076）**不代表**可以撤 filter —— 同一次评估里
+> 零介入率只有 **0.16**，即滤波器 **84% 的步都在介入**（中位修正 0.64 m/s）。
+> 两者必须同时看：现在的状态是「**滤波器大量做无用功**」（只扣朝障碍的法向靠近速度，
+> 不改变切向朝目标进度），**不是**「策略已内化安全」。
+
+### 3.2 训练内 eval（`wandb-summary.json`，窗口口径，**非验收口径**）
 
 | 口径 | seed 11 | seed 12 | seed 13 | 3-seed 均值 |
 |---|---|---|---|---|
-| wandb 训练内 eval `success_rate`（窗口口径，**非验收口径**） | 0.4766 | 0.4229 | 0.3965 | **0.4320** |
-| wandb 训练内 eval `min_clearance`（m） | 0.6584 | 0.6227 | 0.6278 | 0.6363 |
+| wandb `eval/stats.success_rate` | 0.4766 | 0.4229 | 0.3965 | **0.4320** |
+| wandb `eval/stats.min_clearance`（m） | 0.6584 | 0.6227 | 0.6278 | 0.6363 |
 | **计划/文档引用的「ON 0.891 / OFF 0.855」** | ？ | ？ | ？ | **？来源不明** |
 
-> ⚠ **G12/G16 未闭环**：文档引用的 `0.891/0.855` 在仓库内**无留档**，且**无法从 wandb run 的
-> `wandb-summary.json` 复现**（表中给出的是训练内 `eval/stats.*`，属 soft-respawn 窗口口径，
-> 与 §4.2/§4.3 的严格单命固定起终点验收口径不同构）。
-> ⇒ **A0 复现判据（plan §3.1 P0.1）在补跑 `eval_ckpt.py` 之前不可用**；详见
-> `navvel_export/navvel-cfb-v1.0.0-dual-p1-s11/acceptance.md`。
->
-> **决策 D-5（2026-09-12）**：`v1.0.0` 的基线成绩 = **补跑 `eval_ckpt.py` 严格单命验收**
-> （`+runtime_filter=true` / `false` 各一次 × 3 seed）重建，**不**采用上表训练内 eval 数值。
-> 结果出来后回填本表与 `acceptance.md`。
+> ⚠ **G16 仍未完全闭环**：文档引用的 `0.891/0.855` 在仓库内**无留档**，**无法从 wandb 复现**，
+> 也与本次实测的新基线（`arrival@0.2 ≈ 0.34`）**不在同一协议上**。本轮的价值是
+> **确立了一个可复现的、写清协议的新基线**，供 `A0′`/`A1a`…`A4` 对比；
+> 旧数字若要复核，需先找到当时的 eval 命令行（仓库内无记录）。
 
 ---
 
