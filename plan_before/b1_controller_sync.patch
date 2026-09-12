@@ -1,0 +1,177 @@
+diff --git a/omni_drones/controllers/lee_position_controller.py b/omni_drones/controllers/lee_position_controller.py
+--- a/omni_drones/controllers/lee_position_controller.py
++++ b/omni_drones/controllers/lee_position_controller.py
+@@ -114,6 +114,32 @@ class LeePositionController(ControllerBase):
+         )
+         self.requires_grad_(False)
+ 
++        # [B1 2026-09-09] optional per-(env,agent) dynamic overrides installed by the env
++        #   right after each reset randomizes the physics (NavVel controller_sync_dr).
++        #   This mirrors a real Crazyflie low-level controller whose firmware self-calibrates
++        #   to the TRUE mass / thrust curve instead of a nominal one. None = nominal
++        #   (original behavior, bit-for-bit compatible).
++        #   Shapes (N = num_envs*n, i.e. the flat batch _compute sees after compute()'s
++        #   reshape(-1, ...)): mass -> (N, 1); max_thrusts -> (N, num_rotors).
++        self._mass_dyn = None
++        self._max_thrusts_dyn = None
++
++    def sync_randomized(self, mass=None, kf=None):
++        """[B1 2026-09-09] make this nominal Lee controller track per-env randomized
++        dynamics. Call right after drone._reset_idx() randomized masses/KF.
++        mass: real per-(env,agent) mass -> gravity/thrust compensation (main DR fix).
++        kf:   real per-env rotor force constant = physical thrust at throttle^2=1, i.e.
++              the true per-rotor max thrust -> updates the cmd normalization bound.
++        """
++        if mass is not None:
++            m = mass.detach().reshape(-1, 1)
++            self._mass_dyn = m.to(self.mass.device)
++        if kf is not None:
++            nrot = self.max_thrusts.numel()
++            k = kf.detach().reshape(-1, nrot)
++            self._max_thrusts_dyn = k.to(self.max_thrusts.device)
++        return self
++
+     def compute(
+         self,
+         root_state: torch.Tensor,
+diff --git a/omni_drones/controllers/lee_position_controller.py b/omni_drones/controllers/lee_position_controller.py
+--- a/omni_drones/controllers/lee_position_controller.py
++++ b/omni_drones/controllers/lee_position_controller.py
+@@ -198,10 +224,13 @@ class LeePositionController(ControllerBase):
+             - ang_rate_err * self.ang_rate_gain
+             + torch.linalg.cross(ang_vel, ang_vel)
+         )
+-        thrust = (-self.mass * (acc * R[:, :, 2]).sum(-1, True))
++        # [B1 2026-09-09] use per-env real mass / max-thrust if synced, else nominal.
++        mass = self._mass_dyn if self._mass_dyn is not None else self.mass
++        max_thrusts = self._max_thrusts_dyn if self._max_thrusts_dyn is not None else self.max_thrusts
++        thrust = (-mass * (acc * R[:, :, 2]).sum(-1, True))
+         ang_acc_thrust = torch.cat([ang_acc, thrust], dim=-1)
+         cmd = (self.mixer @ ang_acc_thrust.T).T
+-        cmd = (cmd / self.max_thrusts) * 2 - 1
++        cmd = (cmd / max_thrusts) * 2 - 1
+         return cmd
+ 
+     def process_rl_actions(self, actions) -> Tensor:
+diff --git a/omni_drones/envs/single/nav_vel.py b/omni_drones/envs/single/nav_vel.py
+--- a/omni_drones/envs/single/nav_vel.py
++++ b/omni_drones/envs/single/nav_vel.py
+@@ -251,6 +271,17 @@ class NavVel(IsaacEnv):
+         if "drone" in self.randomization:
+             self.drone.setup_randomization(self.randomization["drone"])
+ 
++        # [B1 2026-09-09] controller_sync_dr: when the action_transform=velocity script
++        #   mounts its low-level Lee controller here (base_env.low_level_controller), each
++        #   reset re-syncs it to the per-env RANDOMIZED real mass/KF after drone._reset_idx.
++        #   This mimics a real Crazyflie low-level controller that self-calibrates to its
++        #   true params; used as a B1 control to test whether the geo7 DR drop is caused by
++        #   the nominal-controller mismatch (sim artifact) rather than policy fragility.
++        #   Default off -> nominal low-level controller (identical to pre-B1 behavior).
++        self.controller_sync_dr = bool(cfg.task.get("controller_sync_dr", False))
++        self.low_level_controller = None
++        self._b1_synced = False
++
+         self.target_vis = ArticulationView(
+             "/World/envs/env_*/target",
+             reset_xform_properties=False
+diff --git a/omni_drones/envs/single/nav_vel.py b/omni_drones/envs/single/nav_vel.py
+--- a/omni_drones/envs/single/nav_vel.py
++++ b/omni_drones/envs/single/nav_vel.py
+@@ -509,6 +571,7 @@ class NavVel(IsaacEnv):
+                 self.level_idx = self.curriculum.level_idx
+ 
+         self.drone._reset_idx(env_ids, self.training)
++        self._sync_low_level_controller()
+ 
+         n = len(env_ids)
+         # --- initial pose (env frame; fixed_init -> 常量, Arena1) ---
+diff --git a/omni_drones/envs/single/nav_vel.py b/omni_drones/envs/single/nav_vel.py
+--- a/omni_drones/envs/single/nav_vel.py
++++ b/omni_drones/envs/single/nav_vel.py
+@@ -585,6 +649,7 @@ class NavVel(IsaacEnv):
+         # same ordering as _reset_idx: reset the drone/articulation view FIRST so the
+         # physics buffers are consistent before we teleport mid-episode.
+         self.drone._reset_idx(env_ids, self.training)
++        self._sync_low_level_controller()
+         pos = self._sample_init_pos(n)
+         # [M2] obstacles of this window are static: rejection-sample the respawn pose so
+         # a fresh life never starts inside/next to an obstacle (layout itself is kept).
+diff --git a/omni_drones/envs/single/nav_vel.py b/omni_drones/envs/single/nav_vel.py
+--- a/omni_drones/envs/single/nav_vel.py
++++ b/omni_drones/envs/single/nav_vel.py
+@@ -617,6 +682,32 @@ class NavVel(IsaacEnv):
+             self.life_collision_edges[env_ids] = 0
+             self.prev_in_collision[env_ids] = False
+ 
++    def _sync_low_level_controller(self):
++        """[B1 2026-09-09] push the drone's current per-env RANDOMIZED dynamics into the
++        low-level controller that the velocity action-transform uses. Called right after
++        drone._reset_idx() (episode reset and mid-episode respawn), so the low-level
++        controller acts like a real Crazyflie firmware that self-calibrates to its true
++        mass/thrust. No-op unless the script mounted a controller AND controller_sync_dr
++        is on (default off -> exactly the pre-B1 nominal-controller behavior).
++        """
++        if not self.controller_sync_dr or self.low_level_controller is None:
++            return
++        ctl = self.low_level_controller
++        if not hasattr(ctl, "sync_randomized"):
++            return
++        n_rot = self.drone.num_rotors
++        mass = self.drone.masses.reshape(-1, 1)        # (N, 1)
++        kf = self.drone.KF.reshape(-1, n_rot)          # (N, num_rotors)
++        ctl.sync_randomized(mass=mass, kf=kf)
++        # [B1 debug] print once so we can confirm randomization actually reached the
++        #   low-level controller (spread over envs > 0 only when DR eval is on).
++        if not self._b1_synced:
++            self._b1_synced = True
++            print(f"[NavVel B1] low-level controller synced: mass "
++                  f"mean={mass.mean().item():.5f} std={mass.std().item():.5f} "
++                  f"[{mass.min().item():.5f},{mass.max().item():.5f}] | "
++                  f"KF mean={kf.mean().item():.6f} (ctrl={type(ctl).__name__})", flush=True)
++
+     def _pre_sim_step(self, tensordict: TensorDictBase):
+         actions = tensordict[("agents", "action")]
+         # capture what controller Transform wrote (prev_action always,
+diff --git a/scripts/eval_ckpt.py b/scripts/eval_ckpt.py
+--- a/scripts/eval_ckpt.py
++++ b/scripts/eval_ckpt.py
+@@ -123,6 +142,10 @@ def main(cfg):
+             from omni_drones.controllers import LeePositionController
+             from omni_drones.utils.torchrl.transforms import VelController
+             controller = LeePositionController(9.81, base_env.drone.params).to(base_env.device)
++            # [B1 2026-09-09] mount the low-level controller on the env so a reset with
++            #   task.controller_sync_dr=true re-syncs it to the per-env randomized mass/KF.
++            #   No effect unless controller_sync_dr is on (env sync is gated on the flag).
++            base_env.low_level_controller = controller
+             vl = cfg.task.get("vel_limit", {})
+             transforms.append(VelController(
+                 controller,
+diff --git a/scripts/train.py b/scripts/train.py
+--- a/scripts/train.py
++++ b/scripts/train.py
+@@ -74,6 +74,8 @@ def main(cfg):
+             from omni_drones.controllers import LeePositionController
+             from omni_drones.utils.torchrl.transforms import VelController
+             controller = LeePositionController(9.81, base_env.drone.params).to(base_env.device)
++            # [B1 2026-09-09] mount low-level controller on env (used by controller_sync_dr).
++            base_env.low_level_controller = controller
+             vl = cfg.task.get("vel_limit", {})
+             transform = VelController(
+                 controller,
+diff --git a/cfg/task/NavVel.yaml b/cfg/task/NavVel.yaml
+--- a/cfg/task/NavVel.yaml
++++ b/cfg/task/NavVel.yaml
+@@ -232,6 +276,13 @@ cbf:
+ #   ⚠️ 仅 train.py 装配; play/eval_ckpt 不注入(确定性 eval 用 +perturb 测鲁棒)。
+ dr_noise_sigma: 0.0
+ 
++# [B1 2026-09-09] 低层控制器动力学同步(对照实验, 默认关):
++#   true 时 env 每次 reset(randomize) 后把随机化后的真实 per-env mass/KF 同步给
++#   action_transform=velocity 挂载的低层 Lee controller(模拟真机固件自标定)。
++#   仅仿真对照用 —— 判定 DR 掉点是"低层标称错配(sim artifact)"还是"策略不鲁棒"。
++#   false=标称低层(与之前逐位一致)。eval: +task.controller_sync_dr=true。
++controller_sync_dr: false
++
+ # ---- domain randomization (optional, keep off for baseline) ----
+ # randomization:
+ #   drone:

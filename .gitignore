@@ -9,3 +9,8 @@ __pycache__/
 *.log
 outputs/
 wandb/
+
+# IsaacLab: 169 MB nested git checkout (its own .git), NOT a submodule of this
+# repo. Keep it out of `git status` noise; register as a proper submodule later
+# if its revision must be pinned (NavVel retrain plan G4 note, 2026-09-12).
+IsaacLab/
