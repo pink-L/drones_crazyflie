@@ -538,7 +538,7 @@ navvel_export/
 | model_id | 状态 | obs | geometry_profile | arm / p | run_id | ckpt sha256(前 12) | 阶段 1 验收 | 阶段 2 验收 |
 |---|---|---|---|---|---|---|---|---|
 | `navvel-cfb-v1.0.0-dual-p1-s11` | **现役** | obs_v2/62 | A0-legacy (`r_cbf=r_o+0.30`) | dual / always-on | run-20260909_191309-hpzc2m3r | `4d604d6c30c9` | n/a（旧世界） | 待测（基线） |
-| `navvel-cfb-v1.1.0-dual-p1-s11` | 候选 | obs_v2/62 | A（`r_cbf=r_o+0.17`） | dual / always-on | P0.2 | — | 待测 | 待测 |
+| `navvel-cfb-v1.1.0-dual-p1-s11` | **候选**（P0.2 已测，未晋升） | obs_v2/62 | A（`r_cbf=r_o+0.17`） | dual / always-on | `run-20260912_203247-7gziinv0`（seed 11） | `e05eba92f4d5` | n/a（球近似） | ✅ 已测 **不通过**（依赖度 0.8969；见 §0.5.9） |
 | …… | | | | | | | | |
 
 状态机：`候选 → 验证中 → 现役 → 退役`（产物**不可变**；晋升只改 `_current` 软链与状态列）。
@@ -597,7 +597,7 @@ flowchart TD
 | 子批 | 配置 | 唯一目的 | 判据 |
 |---|---|---|---|
 | **P0.1** | `A0` = 交付口径原样（4 柱×4 层 `r=0.354`、12 自由球、`side=0.5`、口径 legacy `0.15/0.05/margin 0.1`、`hybrid+dual`、3 seed 11/12/13） | 复现 `v1.0.0`，确认流水线仍在（含 `init_ckpt` 续训路径） | **✅ 2026-09-12 完成，逐位复现**：`arrival@0.2`(ON) 3-seed 均值 **Δ=0.0000**、3 seed 的 `checkpoint_final.pt` **sha256 与交付完全相同**。详见 §0.5.6。判据已由"±0.02"收紧为"**sha256 相同**"（同机） |
-| **P0.2** | `A0′` = A0 + **仅**口径 A（`drone_radius 0.10 / inflation 0.02 / r_safety_margin 0.05 / use_brake_term=false` ⇒ `r_s=r_o+0.12`、`r_cbf=r_o+0.17`） | **隔离"口径 A"这一个变量**，得到阶段 2 的基线；同时产出 `v1.1.0` | 记录 ON/OFF 双列 + `h_min`；预期 OFF 列会**变差**（约束放宽），这正是 P3 要治的对象 |
+| **P0.2** | `A0′` = A0 + **仅**口径 A（`drone_radius 0.10 / inflation 0.02 / r_safety_margin 0.05 / use_brake_term=false` ⇒ `r_s=r_o+0.12`、`r_cbf=r_o+0.17`） | **隔离"口径 A"这一个变量**，得到阶段 2 的基线；同时产出 `v1.1.0` | **✅ 2026-09-12 完成**（详见 §0.5.9）：ON/OFF 双列已记录；**预期被证实且更细致** —— 到达率 ON 0.3412→**0.4733**、零介入率 0.1613→**0.2429**（介入减 40%）；**依赖度 1.0076(过)→0.8969(不过)**，即失败原因由"滤波器无用"变成"滤波器有真实贡献"；OFF 碰撞 env 1→5（同批次内可比）。判据：三 seed 全出 final + 6/6 验收 `exit=0` ✅ |
 
 > **为什么 P0.2 必须在几何变化之前**：口径 A 会同时改变**碰撞判定半径**（`r_s` 从 `r_o+0.20` → `r_o+0.12`），
 > 即"什么算撞"变了 ⇒ 旧 run 的"0 碰"与后续所有"0 碰"**不可直接比较**。先把这条基线单独立出来，后面 A1–A4 的成绩才有参照。
@@ -900,14 +900,19 @@ print('r_cbf=', cbf_safety_radius(r_o,0.10,0.02,0.05,1.8,2.0,use_brake_term=Fals
 
 ---
 
-**下一步（立刻可做）**：K1 ✅ / K5 ✅ / **P0.1 ✅（逐位复现）** 已完成（见 §0.5）。
-接下来 **P0.2（口径 A，产出 `v1.1.0`）**：
-① 先从交付配置派生 `cfg/profiles/A-legacy_chiA.yaml`：`drone_radius 0.10 / inflation 0.02 /
-`cbf.r_safety_margin 0.05 / use_brake_term false`（**`collision_margin` 保持 0.05**，D-1），
-其余与 `A0-legacy` 逐位相同 —— 用 `scripts/make_geometry_profile.py` 生成后**手工改这 4 个键**；
-② 3 seed × 20M 续训（沿用 `P0.1` 的 6 项非 task 参数与 `warm-start` 口径），
-wandb 建议 `project=env_design_geo10_p01repro` / `group=NavVEL-P0.2-chiA`；
-③ 6 次验收评估（同 512×600 协议）并与 §0.5.5 基线对照：**预期 OFF 列变差、零介入率进一步下降**
-（这正是 P3 的输入）；
-④ 跑完按 §2.1 升 **MINOR** 版本 → `navvel-cfb-v1.1.0-*`，建新 model 目录 + 注册表新行。
-> 另：P0.1 已证明同机逐位可复现 ⇒ P0.2 与 P0.1 的差异**只可能来自那 4 个键**，归因非常干净。
+**下一步**：K1 ✅ / K5 ✅ / P0.1 ✅（逐位复现）/ **P0.2 ✅（2026-09-12 完成，见 §0.5.9）**。
+
+**P0.2 的实际执行（与原计划的差异，均已记录）**：
+① profile 未用"手工改 4 键"，而是给 `make_geometry_profile.py` 加了**派生模式**（`--from-profile …
+--set k=v`），只改**3 个键**（`use_brake_term` 本来就是 `false`，工具如实报告"未变化"）；
+② 3 seed × 20M 续训，wandb `fly-hust/env_design_geo10_p01repro`、group `NavVel-P0.2-chiA`，
+run group `run-20260912_203247`（s12 因收尾 OOM 另起 `run-20260912_204807` 单进程重跑）；
+③ 6 次验收评估（同 512×600 协议）已跑完并与 §0.5.5 基线对照 —— **预期被证实**：OFF 列变差
+（依赖度 1.0076→0.8969 转红）、零介入率 0.1613→0.2429（介入反而减少，因约束放宽）；
+④ 已按 §2.1 升 **MINOR** → `navvel-cfb-v1.1.0-dual-p1-s11`，建新 model 目录（16 项 `SHA256SUMS`
+全过）+ 注册表新行 §3.4 + tag `navvel-cfb-v1.1.0`；**因阶段 2 未通过，`_current` 不晋升**。
+> 另：P0.1 已证明同机逐位可复现 ⇒ P0.2 与 P0.1 的差异**只可能来自那 3 个键**，归因非常干净。
+
+**P0.2 带出的两个新缺口（必须先处理再开 P1）**：**G20**（`h_min` 与 `min_clearance − cbf_extra`
+不自洽 ⇒ 安全门禁暂不可信，见 §0.5.9③）与 **G21**（批量脚本传相对路径会静默全挂，已加保护）。
+
