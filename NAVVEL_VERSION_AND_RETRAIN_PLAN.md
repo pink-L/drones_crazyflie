@@ -354,6 +354,38 @@ torch 栈，`acceptance_eval` 只在末尾打 WARN）⇒ 已加 `os.path.abspath
 
 ---
 
+### 0.5.10 P1（阶段 1a 几何泛化）启动记录（2026-09-12）
+
+**① 新工具（本批次产出，后续全部复用）**
+
+| 工具 | 用途 | 关键约定 |
+|---|---|---|
+| `scripts/train_batch.py` | 训练批次 runner：N seed × 1 profile，**并发默认 2** | 6 项非 task 参数单一来源固化（`seed/entropy_coef=0.05/total_frames=20M/save_interval=100/+render_eval=false/+init_ckpt=<geo8>`）；自动 `sha256` 最终 ckpt；结束打印 `[train_batch] <seed> exit=… sha256=…` 便于直接抄进注册表/lineage。**并发 2 是硬约束**（坑 5：20M 帧末期 ~11 GiB/进程，3 路必然收尾 OOM） |
+| `scripts/pillar_layout_check.py` | 柱世界的 CPU 布局校验（对应 §3.2 的 G8 要求） | 校验 1) 全槽激活 `== M` 2) 起/终点净空 3) 障碍互距（**柱↔柱用 xy 距离**；同柱各层共享 xy 列，不能参与互距）4) 柱间走廊宽度 `dxy − 2·pillar_radius` 5) `--connectivity` 用 2-D 栅格 BFS 判 xy 连通性。失败即非零退出 ⇒ 可当 CPU 门禁用 |
+
+> ⚠️ 两个坑已修：`train_batch` 早期把父进程 `argv` 整体透传，导致 `--seeds` 被子进程 argparse 拒绝
+> （`exit=2`、**不占 GPU** 瞬间失败）⇒ 改为**显式转发**公用选项。`pillar_layout_check` 早期把**同柱
+> 各层**也算作互距对，得到恒为负的假失败 ⇒ 改为按柱分组。
+
+**② A1a 设置（唯一变量 = 去掉 12 个自由球）**
+
+* `cfg/profiles/A1a.yaml` = 从 `A` 派生，**实质只改 1 键**：`obstacle.n_free_obstacles 12 → 0`
+  ⇒ `M = 4×4 = 16`（原 28）。**无需改代码**（`_sample_pillar_mixed` 对 `Mf=0` 有 `if Mf > 0` 守卫）。
+* 校验：M=16 全激活 ✅、起终点净空 ✅（0.24 / 0.43 ≥ 0.15 / 0.35）、互距 ≥ 0.25 ✅、
+  **xy 连通性 6/6 通过** ✅。柱间走廊宽 0.27–0.52 m —— **低于 A3 的下界 1.198 m，这是预期的**
+  （4 根固定柱的世界本来就只有窄缝；该下界属 A3 引入随机柱数时的要求，A1a 不适用）。
+* 训练：`task=profiles/A1a`，3 seed（11/12/13）× 20M，2 路并行，warm-start 与 P0.1/P0.2 同一个
+  geo8 ckpt ⇒ 与 P0.2 口径 A 基线**真单变量**（只差"有无自由球"）。
+  wandb：`fly-hust` / **新项目 `env_design_geo11_p1geom`** / group `NavVel-P1-A1a`，
+  run name `cfb-dual-chiA-a1a-{11,12,13}-final`。
+* 预期观察（§3.2 A1a 行）：`r_o` 通道仍 0.708（自由球半径档位与柱半径不同）；**CBF 介入率应下降**
+  （障碍数 28→16，约束绑定概率降低）⇒ 零介入率应高于 0.2429；依赖度与 `arrival` 与 P0.2 逐项对照。
+* 验收：6 次（3 seed × ON/OFF），协议与 P0.1/P0.2 **逐字相同**（512×600、`set_seed=1000+seed`、
+  固定起终点）。**碰撞列与 P0.2 可比**（判撞半径未变，仍是 `r_s=r_o+0.12`）。
+
+
+---
+
 ## 1. 当前版本现状
 ### 1.1 交付物与谱系（已核实）
 
