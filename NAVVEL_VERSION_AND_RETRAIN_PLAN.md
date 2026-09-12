@@ -122,6 +122,44 @@
 >
 > 另外 `dropped_relevant ≈ 0` ⇒ **A0 未出现 K=8 容量不足**（A3/A4 柱数升到 8 后需重测）。
 
+### 0.5.6 P0.1 已完成（2026-09-12）—— **逐位完全复现 ✅**
+
+**目的**：复现 `v1.0.0`（含 `+init_ckpt` 续训路径），并验证 `A0-legacy` profile 是交付配置的**完整快照**（G3）。
+
+**命令**（task 侧 100% 来自 profile；非 task 参数只剩 6 项 ⇒ 这本身就是 profile 完整性的证据）：
+
+```bash
+cd drones/OmniDrones/scripts
+<lz_env>/bin/python train.py task=profiles/A0-legacy algo=ppo headless=true \
+  wandb.mode=online wandb.entity=fly-hust wandb.project=env_design_geo10_p01repro \
+  wandb.group=NavVel-P0.1-repro wandb.run_name=cfb-dual-DR2-ctrlSync-p01-<1|2|3> \
+  seed=<11|12|13> algo.entropy_coef=0.05 total_frames=20000000 save_interval=100 \
+  +render_eval=false +init_ckpt=<geo8>/files/checkpoint_19693568.pt
+```
+
+> **新增 wandb 项目（后续批次沿用建议）**：`fly-hust / env_design_geo10_p01repro`，
+> group `NavVel-P0.1-repro`，run group `run-20260912_195345`（`7wexmcym` / `bd51cg95` / `npgxdjor`）。
+
+| 判据 | 门槛 | 实测 | 结论 |
+|---|---|---|---|
+| `arrival@0.2`(ON) 3-seed 均值 vs §0.5.5 基线 | ±0.02 | **Δ = 0.0000**（0.3412 vs 0.3412） | ✅ **PASS** |
+| `checkpoint_final.pt` sha256 vs 交付 run | 记录 | **3/3 完全相同** | ✅ PASS |
+| 训练侧 `eval/stats.*` / `train/stats.*` vs 交付 | 记录 | 逐项相同（`env_frames=19988480`、`entropy`、`cbf_violation` …） | ✅ PASS |
+| 流水线（含 `+init_ckpt`）可用 | 必须 | 3/3 正常完成，19:53→20:08 ≈ 15 min | ✅ PASS |
+
+**含义（重要）**：
+
+1. **本机训练逐位确定**：同 (代码 commit, 配置, seed, 硬件, 库版本) ⇒ **权重 sha256 完全相同**
+   ⇒ `P0.2 / A1a…A4` 的批次对比是**真单变量**（跨批次运行噪声 = 0），归因能力强于本计划预期。
+2. 两点边界：
+   - **不**证明跨机器可复现（未换机器/驱动/库版本验证）；
+   - 逐位确定 ⇒ 3 seed 只提供**种间差异**（0.3086–0.3887，跨度很大），**不提供运行噪声估计**
+     ⇒ §4.2 的 `±0.02` 对"同机重跑"偏宽松，对"换配置重训"才是有效门槛。
+3. `A0-legacy` profile 已被证明**忠实且完整**（G3 闭环）。
+
+**证据**：`navvel_export/navvel-cfb-v1.0.0-dual-p1-s11/repro_p01/`
+（`REPRO.md` + 3 份训练日志 + 6 份评估日志 + `eval_metrics.json` + `SHA256SUMS`，全部 `sha256sum -c` 通过）。
+
 ---
 
 ## 1. 当前版本现状
@@ -391,7 +429,7 @@ flowchart TD
 
 | 子批 | 配置 | 唯一目的 | 判据 |
 |---|---|---|---|
-| **P0.1** | `A0` = 交付口径原样（4 柱×4 层 `r=0.354`、12 自由球、`side=0.5`、口径 legacy `0.15/0.05/margin 0.1`、`hybrid+dual`、3 seed 11/12/13） | 复现 `v1.0.0`，确认流水线仍在（含 `init_ckpt` 续训路径） | 3-seed 均值与 §1.2 交付成绩一致（修 G12：以 3-seed 均值作基准，ON 0.891 / OFF 0.855 视为 seed 11） |
+| **P0.1** | `A0` = 交付口径原样（4 柱×4 层 `r=0.354`、12 自由球、`side=0.5`、口径 legacy `0.15/0.05/margin 0.1`、`hybrid+dual`、3 seed 11/12/13） | 复现 `v1.0.0`，确认流水线仍在（含 `init_ckpt` 续训路径） | **✅ 2026-09-12 完成，逐位复现**：`arrival@0.2`(ON) 3-seed 均值 **Δ=0.0000**、3 seed 的 `checkpoint_final.pt` **sha256 与交付完全相同**。详见 §0.5.6。判据已由"±0.02"收紧为"**sha256 相同**"（同机） |
 | **P0.2** | `A0′` = A0 + **仅**口径 A（`drone_radius 0.10 / inflation 0.02 / r_safety_margin 0.05 / use_brake_term=false` ⇒ `r_s=r_o+0.12`、`r_cbf=r_o+0.17`） | **隔离"口径 A"这一个变量**，得到阶段 2 的基线；同时产出 `v1.1.0` | 记录 ON/OFF 双列 + `h_min`；预期 OFF 列会**变差**（约束放宽），这正是 P3 要治的对象 |
 
 > **为什么 P0.2 必须在几何变化之前**：口径 A 会同时改变**碰撞判定半径**（`r_s` 从 `r_o+0.20` → `r_o+0.12`），
@@ -695,11 +733,14 @@ print('r_cbf=', cbf_safety_radius(r_o,0.10,0.02,0.05,1.8,2.0,use_brake_term=Fals
 
 ---
 
-**下一步（立刻可做）**：K1 ✅ / K5 ✅ 已完成（见 §0.5）。接下来
-① 开 **P0.1**（`A0` 3-seed 复现）：判据改为「与 §0.5.5 的新基线（`arrival@0.2` ON 0.3412 /
-OFF 0.3438）同协议比对，3-seed 均值在 ±0.02 内」—— 协议参数见 §0.5.5-②，命令见
-`scripts/acceptance_eval.sh`；顺带记录 P0.1 的 `h_min`/零介入率作为 P0.2 的对照；
-② 开 **P0.2**（口径 A，`v1.1.0`）：预期 OFF 列进一步变差、零介入率进一步下降 —— 这正是
-**P3** 的输入；
-③ P0.1/P0.2 开训前建议复跑一次 `export_navvel_actor.py` 对拍（本轮改过 `cbf.py`，
-虽未动 `filter_velocity` 数学，但按 §2.4 红线纪律应留档）。
+**下一步（立刻可做）**：K1 ✅ / K5 ✅ / **P0.1 ✅（逐位复现）** 已完成（见 §0.5）。
+接下来 **P0.2（口径 A，产出 `v1.1.0`）**：
+① 先从交付配置派生 `cfg/profiles/A-legacy_chiA.yaml`：`drone_radius 0.10 / inflation 0.02 /
+`cbf.r_safety_margin 0.05 / use_brake_term false`（**`collision_margin` 保持 0.05**，D-1），
+其余与 `A0-legacy` 逐位相同 —— 用 `scripts/make_geometry_profile.py` 生成后**手工改这 4 个键**；
+② 3 seed × 20M 续训（沿用 `P0.1` 的 6 项非 task 参数与 `warm-start` 口径），
+wandb 建议 `project=env_design_geo10_p01repro` / `group=NavVEL-P0.2-chiA`；
+③ 6 次验收评估（同 512×600 协议）并与 §0.5.5 基线对照：**预期 OFF 列变差、零介入率进一步下降**
+（这正是 P3 的输入）；
+④ 跑完按 §2.1 升 **MINOR** 版本 → `navvel-cfb-v1.1.0-*`，建新 model 目录 + 注册表新行。
+> 另：P0.1 已证明同机逐位可复现 ⇒ P0.2 与 P0.1 的差异**只可能来自那 4 个键**，归因非常干净。
