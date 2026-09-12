@@ -44,11 +44,15 @@
 | wandb 训练内 eval `min_clearance`（m） | 0.6584 | 0.6227 | 0.6278 | 0.6363 |
 | **计划/文档引用的「ON 0.891 / OFF 0.855」** | ？ | ？ | ？ | **？来源不明** |
 
-> ⚠ **G12 未闭环**：文档引用的 `0.891/0.855` 在仓库内**无留档**，且**无法从 wandb run 的
+> ⚠ **G12/G16 未闭环**：文档引用的 `0.891/0.855` 在仓库内**无留档**，且**无法从 wandb run 的
 > `wandb-summary.json` 复现**（表中给出的是训练内 `eval/stats.*`，属 soft-respawn 窗口口径，
 > 与 §4.2/§4.3 的严格单命固定起终点验收口径不同构）。
 > ⇒ **A0 复现判据（plan §3.1 P0.1）在补跑 `eval_ckpt.py` 之前不可用**；详见
 > `navvel_export/navvel-cfb-v1.0.0-dual-p1-s11/acceptance.md`。
+>
+> **决策 D-5（2026-09-12）**：`v1.0.0` 的基线成绩 = **补跑 `eval_ckpt.py` 严格单命验收**
+> （`+runtime_filter=true` / `false` 各一次 × 3 seed）重建，**不**采用上表训练内 eval 数值。
+> 结果出来后回填本表与 `acceptance.md`。
 
 ---
 

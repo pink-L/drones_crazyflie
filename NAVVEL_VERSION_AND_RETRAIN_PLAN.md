@@ -33,6 +33,52 @@
 
 ---
 
+## 0.5 K1 执行记录（2026-09-12）
+
+> **状态：K1 六项入库动作全部完成 ✅**，卡点 **K1 = 绿**。新增缺口 G13–G17（见 §1.4）。
+
+### 0.5.1 已完成动作（对应 §2.7）
+
+| # | 动作 | 结果 |
+|---|---|---|
+| 1 | 提交计划文档与脚本副本 | 外层 commit `d47d87e`；文档/`plan_before/`/`figures/`/论文 md 全部入库 |
+| 2 | 子模块提交 + 打 tag | 子模块 commit `2a5c1b0`；外层 annotated tag **`navvel-cfb-v1.0.0`** |
+| 3 | 迁移导出物 + `SHA256SUMS` + `lineage.json` | `/home/lz/lzspace/navvel_export/navvel-cfb-v1.0.0-dual-p1-s11/`；新增 `run_config.yaml`、`acceptance.md`；`sha256sum -c` 全绿 |
+| 4 | 落地 `cfg/profiles/A0-legacy.yaml` | ✅ **142 leaf keys 完整快照**，自包含（base env/sim 已内联）；hydra 可加载为 `task=profiles/A0-legacy` |
+| 5 | 建注册表 | `drones/NAVVEL_MODEL_REGISTRY.md`（含 3-seed checkpoint 哈希 + G12 留档） |
+| 6 | 建 `_current` 软链 | `navvel_export/_current -> navvel-cfb-v1.0.0-dual-p1-s11` |
+
+### 0.5.2 与文档假设不符之处（执行时修正）
+
+| 项 | 文档假设 | 实际 |
+|---|---|---|
+| 仓库根 | §2.7-1 写 `git add drones/*.md …`（暗示仓库根 = 工作区根） | **`/home/lz/lzspace` 不是 git 仓库**；仓库根 = `drones/`。故 `drones/*.md` → `*.md`（仓库内） |
+| 脚本副本路径 | §2.7-1 写 `export_navvel_actor.py`（工作区根，仓库外） | 已复制到 **`drones/OmniDrones/scripts/export_navvel_actor.py`**（= §1.1 所说"服务器路径"）并入库；工作区根副本保留 |
+| profile 路径 | §2.7-4 写 `cfg/profiles/<profile>.yaml` | 内容落在此路径；另加**软链** `cfg/task/profiles -> ../profiles`，使 hydra 能按 task 组加载（`train.yaml` 的 `defaults: - task: <name>` 只认 `cfg/task/`） |
+| `algo=ppo` 配置 | （未提及） | **`cfg/algo/ppo.yaml` 不存在且 git 历史从未有过**；PPO 超参由代码内 `ConfigStore` 注册（`omni_drones/learning/ppo/ppo.py:59`）⇒ 见 G15 |
+| 子模块状态 | G4 说"有未提交改动" | 执行时**已 clean**，但 HEAD 与外层记录的指针差 15 个 commit（`+774538f`） |
+
+### 0.5.3 附录 A 四条核查命令的结果
+
+| 命令 | 结论 |
+|---|---|
+| **G1** 部署侧文件定位 | ❌ **仍缺**。在 `/home` 全盘 `find`（`navvel_deploy*.yaml` / `navvel_obstacles*.yaml` / `navvel_cbf.py` / `navvel_offline_check.py`）**零命中**；`navvel*` 目录只找到 `navvel_export`。⇒ K6 仍红 |
+| **G6** `eval_ckpt.py` 指标 | ⚠️ **部分可用**：已有 `+runtime_filter=true|false`（= 文档说的 `filter_mode`，ON/OFF 判据可用），并输出 `arrival_rate`/`collision`/`collision_episodes`/`min_clearance`/`success_rate`/end-cause/`reach`(需 `+record_min_rpos=true`)。**但缺** `intervened` 零介入率、`h_min^train`、`Δa` p50/p95、`stall`、`dropped_relevant` ⇒ §4.2/§4.3 的门槛仍无法直接判 |
+| **G11/G12** 三 seed 成绩 | ✅ 已取到，但**口径与文档不同**：`wandb-summary.json` 只有训练内 `eval/stats.*`（soft-respawn 窗口口径），3-seed `success_rate` 均值 **0.4320**（0.4766/0.4229/0.3965），`min_clearance` 均值 0.6363，`collision`=0。文档引用的 **ON 0.891 / OFF 0.855 无留档且不可复现** ⇒ 见 G16 |
+| **口径 A 半径链自检** | ✅ 本地实跑 `omni_drones.utils.cbf`，与本文数值**完全一致**：`A0-legacy` `r_s=r_o+0.20` / `r_cbf=r_o+0.30`；`A` `r_s=r_o+0.12` / `r_cbf=r_o+0.17` |
+
+### 0.5.4 D-1–D-4 决策（2026-09-12 已确认，见附录 A）
+
+| 项 | 决策 |
+|---|---|
+| **D-1** | 口径 A **不改** `collision_margin`，保持 `0.05` |
+| **D-2** | `K=8→12` 扩容**放 P4**，1a 保持 K=8 |
+| **D-3** | `obs_v3` 取 **SDF+法向 7 维** ⇒ obs = 30+7×12 = **114** |
+| **D-4** | 阶段 1 真机沿用 `arrival@0.2 ≥ 0.85` |
+| **D-5（新增）** | `v1.0.0` 基线 = **补跑 `eval_ckpt.py` 严格单命验收重建**（不用训练内 eval 0.4320） |
+
+---
+
 ## 1. 当前版本现状
 
 ### 1.1 交付物与谱系（已核实）
@@ -146,6 +192,11 @@
 | **G10** | `pillar_side`、`n_pillars_range`、`pillar_layers_range`、`min_corridor` **cfg 键不存在** | `[cfg]` | A1b–A4 |
 | **G11** | 柱数/层数上限未做**显存与物理预算预检**：8 柱 × 6 层 = **48 ball/env × 1024 env**（现状 28×1024） | `[code]` 推算 | A3/A4 开训可行性 |
 | **G12** | 交付模型的 **3 seed 成绩表**（0.891/0.855 是哪个 seed / 3-seed 均值？）未在仓库内留档 | `[待确认]` | §4.2 A0 复现判据 |
+| **G13** ✅已修 | **外层 `drones/` 仓库无 git 提交身份**（`user.name`/`user.email` 全未配置，`git commit` 直接失败） | `[fs]` `git config --get` 空 | K1 可执行性；**已设 repo-local 身份 = 与子模块一致（`pink-L`）** |
+| **G14** ✅已修 | `drones/IsaacLab/` = **169 MB、自带 `.git` 的嵌套仓库**，未作为 submodule 登记，永久污染 `git status` | `[fs]` `du -sh`、`IsaacLab/.git` | 版本管理噪音；**已加入 `drones/.gitignore`**；若要钉版本需登记为 submodule |
+| **G15** | **`cfg/algo/ppo.yaml` 不存在，且 git 全历史从未有过**；`algo=ppo` 的超参来自**代码内 ConfigStore**（`omni_drones/learning/ppo/ppo.py:59` `cs.store("ppo", node=PPOConfig, group="algo")`，另有 `ppo_priv`/`ppo_priv_critic`） | `[code]` + `[fs]` find 零命中；`train.py --cfg job` 可组合出 `algo:{name: ppo, train_every: 32, ppo_epochs: 4, num_minibatches: 16, entropy_coef: 0.001, …}` | **训练锚 §2.3 必须含代码 commit**，不能只靠 cfg 快照；`run_config.yaml` 里的 `algo.*` 是解析结果、非来源 |
+| **G16** | **交付成绩 `ON 0.891 / OFF 0.855` 在仓库内无留档，且无法从 wandb 复现**；`wandb-summary.json` 只有训练内窗口 eval（3-seed `success_rate` 均值 **0.4320**，口径与 §4.2/§4.3 验收不同构） | `[fs]` 3 个 run 的 `wandb-summary.json` | **P0.1 判据原文（"3-seed 均值与交付成绩一致"）不可用**；D-5 决定补跑 `eval_ckpt.py` 重建基线 |
+| **G17** | **`scripts/wandb/` 被 `.gitignore`（OmniDrones/.gitignore:135 `wandb/`）** ⇒ 全部 `checkpoint_final.pt` 只存在于磁盘单点，无备份、无校验清单；一次误删即产物不可恢复 | `[fs]` `git check-ignore -v` | 长期风险；建议对 `_current` 的 ckpt 做外部归档 + 把哈希写进注册表（本轮已写哈希，**归档未做**） |
 
 ### 1.5 现状的一句话总结
 
@@ -422,7 +473,7 @@ flowchart TD
 
 | 卡点 | 内容 | 阻塞 |
 |---|---|---|
-| **K1** | §2.7 六项入库动作全绿（tag / 目录 / SHA256SUMS / profile / 注册表 / `_current`） | P0 之外的一切 |
+| **K1** | §2.7 六项入库动作全绿（tag / 目录 / SHA256SUMS / profile / 注册表 / `_current`）—— **✅ 2026-09-12 已绿**（见 §0.5） | ~~P0 之外的一切~~ 已解除 |
 | **K2** | `geometry_profile: A`（口径 A）数值冻结并写入 `meta.json` 模板 | P0.2、P1 |
 | **K3** | `M=48`（8 柱×6 层）smoke test 通过（不 OOM、物理不炸），否则定 `n_pillars_range` 上界（G11） | A3 |
 | **K4** | `pillar_layout_check.py` 实现 + CPU 单测通过；`min_corridor` 下界已按 `r_o=0.4243` 算出（G8） | A3/A4 |
@@ -573,12 +624,13 @@ print('r_cbf=', cbf_safety_radius(r_o,0.10,0.02,0.05,1.8,2.0,use_brake_term=Fals
 "
 ```
 
-**还需你人工确认的语义项（代码里查不到）**
+**人工确认项（2026-09-12 已确认，原为待确认）**
 
-1. **D-1**：口径 A 是否连 `collision_margin` 一起改？（建议：**不改**，保持 0.05）
-2. **D-2**：`K` 扩容确认放 P4？（本文默认；若要 1a 就升维，则 1a 也变成红线批，周期 +1 轮）
-3. **D-3**：`obs_v3` 选 **SDF+法向（7 维）** 还是 **半尺寸+yaw（8 维）**？（建议 SDF+法向，与 CBF 同几何量）
-4. **D-4**：阶段 1 真机验收是否要求 `arrival@0.2 ≥ 0.85`，还是按现场条件另定？（现取指南建议值）
+1. **D-1** ✅ 决策：口径 A **不改** `collision_margin`，保持 **0.05**（只动 `drone_radius 0.10` / `inflation 0.02`）
+2. **D-2** ✅ 决策：`K=8→12` 扩容**放 P4**；1a 保持 K=8，仅加"同柱层数上限"监控 + `dropped_relevant` 统计
+3. **D-3** ✅ 决策：`obs_v3` 取 **SDF+法向 7 维**（`[rpos(3)/5, sdf/0.6, 法向(3)]`）⇒ obs = 30+7×12 = **114**
+4. **D-4** ✅ 决策：阶段 1 真机验收沿用 **`arrival@0.2 ≥ 0.85`**
+5. **D-5（执行中新发现，见 G16）** ✅ 决策：`v1.0.0` 基线**补跑 `eval_ckpt.py` 严格单命验收重建**，不使用训练内 eval 的 0.4320
 
 ---
 
@@ -596,4 +648,8 @@ print('r_cbf=', cbf_safety_radius(r_o,0.10,0.02,0.05,1.8,2.0,use_brake_term=Fals
 
 ---
 
-**下一步（立刻可做）**：按 §2.7 执行六项入库动作（K1），跑附录 A 的 G1/G6/G11/G12 四条命令，填 §0 的 D-1–D-4，然后开 P0.1。
+**下一步（立刻可做）**：K1 已完成 ✅（见 §0.5）。接下来
+① 按 **D-5** 补跑 `eval_ckpt.py` 严格单命验收（`+runtime_filter=true` 与 `false` 各一次 + 3 seed），
+重建 `v1.0.0` 的 ON/OFF 基线 —— 这同时把 G16 闭环；
+② 实现 `eval_ckpt.py` 缺失的指标（零介入率 / `h_min^train` / `Δa` p50,p95 / `stall` / `dropped_relevant`）完成 **K5**（G6）；
+③ 然后开 **P0.1**（`A0` 3-seed 复现）。
