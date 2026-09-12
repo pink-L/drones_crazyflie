@@ -384,6 +384,33 @@ torch 栈，`acceptance_eval` 只在末尾打 WARN）⇒ 已加 `os.path.abspath
 * 验收：6 次（3 seed × ON/OFF），协议与 P0.1/P0.2 **逐字相同**（512×600、`set_seed=1000+seed`、
   固定起终点）。**碰撞列与 P0.2 可比**（判撞半径未变，仍是 `r_s=r_o+0.12`）。
 
+**③ A2/A3 代码（已实现并 CPU 验证，A2 可用；A3 待补连通性门禁）**
+
+设计纪律：**新增独立方法** `_sample_pillar_random`，uniform 路径（`_sample_pillar_mixed`）**一行不改**
+⇒ A0/A/A1a/A1b 已冻结 profile 的采样分布逐位不变，"单变量"对比成立。新键（全部默认 `null` = 关）：
+
+| 键 | 含义 |
+|---|---|
+| `obstacle.n_pillars_range` | `[lo,hi]` 每 env 柱数随机（A3） |
+| `obstacle.pillar_layers_range` | `[lo,hi]` 每柱层数随机（A2，修 G9） |
+| `obstacle.pillar_z_range` | `[[zlo_lo,zlo_hi],[zhi_lo,zhi_hi]]` 每柱 z 跨度随机（A2） |
+| `obstacle.min_corridor` | 走廊瓶颈下界 W（A3）——**语义见下，门禁待实现** |
+| `obstacle.layout_tries` | 采样重试次数（默认 6，逐次把净空约束 ×0.9^k 放松） |
+
+* 槽位编号：**每柱固定块** `[p·L_max, (p+1)·L_max)`，未用槽 `active=False`
+  ⇒ `clearances()` 把它们置 `+inf`、`build_obs` 取最近 K 个，**obs/窗口机制无需改动**。
+* `M = n_pillars_max × pillar_layers_max + n_free`：A2 = **24**，A3 = **48**（现状 28）。
+* CPU 验证：**A2 PASS**（per-env 激活槽 11–21，随逐柱层数变化；净空/互距/连通性全过）；
+  **A0-legacy / A / A1a / A1b / A2 回归全 PASS**（无回归）。
+* ⚠️ **A3 的 `min_corridor` 语义已纠正**：它**不是**"柱对间距 ≥ W"。按原写法
+  `need_gap = 2r + W = 2.19 m`，6 m 场地里放 8 根 `r_o=0.4243` 的柱**不可能**——实测柱体重叠到
+  `gap = −0.80 m`，3 次里有 2 次采样失败。正确语义是**"存在一条起点→终点、瓶颈净宽 ≥ W 的通路"**，
+  必须在采样后做**阈值化连通性校验**（栅格 BFS，阻挡判据 `‖xy−p_i‖ < r_o + W/2`），失败则重采/减柱。
+  该门禁**尚未实现** ⇒ 现在 `min_corridor` 为 `NotImplementedError` **fail-fast**，避免
+  "带着未验证的世界开训"（计划 §3.2 的 G8 硬约束仍未闭环）。
+* A3 仍需：上面的连通性门禁 + **M=48 的 3-iter smoke test**（K3 卡点，§3.2 G11）。
+
+
 
 ---
 
