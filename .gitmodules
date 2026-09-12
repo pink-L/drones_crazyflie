@@ -1,4 +1,4 @@
 [submodule "OmniDrones"]
 	path = OmniDrones
-	url = https://github.com/tshiamor/OmniDrones.git
+	url = git@github.com:pink-L/Omnidrones_crazyflight_obs.git
 	branch = isaacsim-5.1-blackwell
