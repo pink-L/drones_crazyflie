@@ -290,23 +290,49 @@ run name `cfb-dual-chiA-p02-{1,2,3}-final`，run group **`run-20260912_203247`**
 4. `dropped_relevant ≈ 0` ⇒ K=8 窗口在 M=28 下未把危险障碍挤出窗口，**§3.2 的"K 容量不足"风险在
    A 仍未出现**；`A3/A4` 柱数翻倍后必须重测（G8/G9）。
 
-**③ ⚠️ 新发现的口径缺陷 G20 —— 不许把 `h_min ≥ 0` 当证据**
+**③ G20 已闭合（2026-09-12，实测）—— `h_min ≥ 0` 可用；差异来自判据时序**
 
-理论上应严格满足 `h_min = min_clearance − cbf_extra`（两把尺子只差标量 `cbf_extra`）。实测：
+**疑问**：理论上应严格满足 `h_min = min_clearance − cbf_extra`（两把尺子只差标量）。P0.2 的
+**OFF 列**却"反向不一致"：
 
 | 批次 | `cbf_extra` | `min_clearance`(ON) | 预测 | 实测 `h_min` | 一致？ |
 |---|---|---|---|---|---|
 | v1.0.0 | 0.10 | 0.0512 | −0.0488 | −0.0500 | ✅ 差 0.0012 |
 | v1.1.0 ON | 0.05 | 0.0508 | +0.0008 | 0.0000 | ✅ 差 0.0008 |
-| **v1.1.0 OFF** | 0.05 | 0.0459 | **−0.0041** | **0.0000** | ❌ **方向相反** |
+| **v1.1.0 OFF** | 0.05 | 0.0459 | **−0.0041** | **0.0000** | ❌ 方向相反 |
 
-**已排除**（本次实测）：诊断抽样（`cbf_diag_steps=307200=600×512`，覆盖全部步）；
-障碍集合口径（CPU 探针实测 `ObstacleManager.pos=(4,28,3)`、`r_safe=(4,28)`，而 `max_slots=8`
-**只截 obs 块**，滤波器拿到的是全部 28 个障碍 ⇒ 与 `min_clearance` 同集合）。
-**待查**（P1 开训前必须定论）：`ep_min_clearance` 的重置时机/窗口；滤波器算 `h` 用的无人机位置
-是否与 `update_min_clearance` 同一步；`r_safe` 与 `clearances()` 自算 r_s 是否同值。
-**处置**：`v1.1.0` 的 `h_min≥0` **名义 PASS 但不计入结论**；建议 P1 前把安全门禁改挂
-**`min_clearance`（全障碍、全步）**，`h_min` 暂降级为诊断量。
+**诊断**（新增 `scripts/cbf_hmin_diag.py`：shadow + `record_diag` 跑短 rollout，逐 (t,env) 落盘
+`h_all`/`dmin_all`/`h_info`/`ep_min`/`done`；离线复算脚本见 §0.5.9 证据）。三次实跑结论：
+
+| 判据 | 结果 |
+|---|---|
+| **恒等式**（滤波器自记 `h_min` vs `min_t dmin_all − cbf_extra`） | **Δ = −1.12e−08**（512 env × 600 步，float32 精度）✅ **成立** |
+| **逐格一致性**（`h_info` vs `dmin_all − cbf_extra`，同一步同一尺子） | **max\|Δ\| = 2.384e−07** ✅ **成立** |
+| 两把尺子/障碍集合 | CPU 探针：`ObstacleManager.pos=(4,28,3)`、`r_safe=(4,28)`；`max_slots=8` **只截 obs 块** ⇒ 滤波器与 `clearances()` 同集合、同尺子 ✅ |
+| 诊断覆盖 | `cbf_diag_steps = 307200 = 600×512`（全覆盖，非抽样）✅ |
+
+**根因 = 判据的时序差，不是数值错误**：`h_min` 是滤波器**在步进前**用当时位置算出的边界余量；
+而 `min_clearance` 是 `dmin = ‖p−p_o‖ − r_s`，在**步进后**的位置上取值，**碰撞判定
+（`in_col = dmin < collision_margin`）也用步进后的位置**。当某一步把机体送进判撞区时，
+`dmin` 会掉到 `collision_margin` 以下（= 该 env 被判碰撞并 reset/重采布局），而**这个状态滤波器
+从来没有机会看到**（下一步该 env 已换布局）⇒ `min_clearance − cbf_extra < h_min` 只可能出现在
+**含碰撞的批次**里。
+**验证**：本次 512×600 的 OFF 复现中 `dmin` 最小 = **+0.050006 > 0.05**（**0 个碰撞**），
+恒等式精确成立 ✅；而真实 P0.2 的 OFF 列有 5 个碰撞 env（s11_off `min_clearance` 0.0381）——
+正好落在"有时序差"的那一侧。
+
+**⇒ 处置（推翻本轮早前的临时建议）**：
+
+* **`h_min ≥ 0` 门禁保留、且可作为证据**：它衡量的正是"滤波器在每个**决策时刻**看到的边界余量"，
+  即阶段 2 命题（策略自身安全）要的量。P0.2 的 `h_min = 0.0000` 是**真实渐近值**——
+  307200 个样本里最小 **+6e−6**，四舍五入到 4 位即 `0.0000`，且**从未穿过 0**（`h = dist − r_cbf`
+  代码里**无任何 clamp**，已逐行确认）。
+* **`min_clearance_global_min` 降级为"环境侧事后量"**：不得与 `h_min` 直接相减比较；含碰撞的
+  批次里它必然偏低。§4.3 记录表应把两者**并列写出并注明差异来源**。
+* **新增 G22**（诊断副作用）：用 `cbf_hmin_diag.py` 复现验收世界时**必须同时传 `seed` 与
+  `+set_seed`**（`acceptance_eval.py` 两个都传）。只传 `+set_seed=1011` 的那次复现跑出 **0 个碰撞**，
+  与真实 `s11_off`（3 个碰撞 env）不同分布 ⇒ 复现验收世界时参数必须逐字对齐。
+
 
 **④ 交付物**：`/home/lz/lzspace/navvel_export/navvel-cfb-v1.1.0-dual-p1-s11/`
 （`navvel_actor.ts`/`obs_test.npy`/`action_test_server.npy`/`cbf_test.npz`/`meta.json` +
@@ -447,7 +473,8 @@ torch 栈，`acceptance_eval` 只在末尾打 WARN）⇒ 已加 `os.path.abspath
 | **G17** | ~~**`scripts/wandb/` 被 `.gitignore`（OmniDrones/.gitignore:135 `wandb/`）** ⇒ 全部 `checkpoint_final.pt` 只存在于磁盘单点，无备份、无校验清单~~ **⚠️ 2026-09-12 复核后降级**：`train.py:262-270` 会把最终 checkpoint 作为 **wandb artifact `NavVel-ppo`** 上传（同时 run files 里也传 `config.yaml`/`output.log`）⇒ **存在异地副本**，风险远低于原描述 | `[fs]` `git check-ignore -v` + `[code]` `train.py` + P0.1 日志 `uploading artifact NavVel-ppo` | 剩余缺口仅"无本地归档/校验清单" —— 本轮已把 sha256 写进注册表与 `lineage.json`、并在各 `SHA256SUMS` 中留档 |
 | **G18** | `scripts/arena1_layout_check.py`（CPU 单测）**当前必崩**：`torch.as_tensor(task.fixed_init, ...)` 遇到仓库默认 `cfg/task/NavVel.yaml` 的 `fixed_init: null` | `[fs]` 实跑 `TypeError: must be real number, not NoneType` @ line 27 | 与本次改动**无关**（K5 未触碰该文件/该键）；但会让 CPU 回归套件常红 ⇒ 建议加 `None` 守卫或改从 profile 读 |
 | **G19** | **`OmniDrones/.gitignore:150` 忽略 `*.sh`** ⇒ 本仓库内 shell 脚本无法入库（本轮 runner 因此改写为 Python） | `[fs]` `git check-ignore -v` | 后续若需 shell 工具，要么 `git add -f`，要么写 `.py`（已按后者处理） |
-| **G20** | **`h_min^train` 与 `min_clearance − cbf_extra` 不一致**（P0.2 的 OFF 列：预测 −0.0041、实测 0.0000，方向相反）⇒ **`h_min ≥ 0` 这条安全门禁目前不可作为证据**。已排除诊断抽样（`cbf_diag_steps=307200=600×512`）与障碍集合（CPU 探针：`pos=(4,28,3)`、`max_slots=8` 只截 obs 块）两种解释 | `[run]` P0.2 六个 `eval_metrics.json` × P0.1 基线 × `/tmp/navvel_p02/probe_obstacle_shapes.py` | **P1 开训前必须定论**（见 §0.5.9③）：查 `ep_min_clearance` 的重置窗口 / 滤波器算 `h` 用的位置是否与 `update_min_clearance` 同一步 / `r_safe` 与 `clearances()` 的 r_s 是否同值。**临时处置**：安全门禁改挂 `min_clearance`（全障碍、全步），`h_min` 降级为诊断量 |
+| **G20** | ~~**`h_min^train` 与 `min_clearance − cbf_extra` 不一致**~~ **✅ 2026-09-12 已闭合**：恒等式**成立**（Δ = −1.12e−08 / 逐格 max\|Δ\| = 2.38e−07）。差异来自**判据时序**：`h_min` 是滤波器**步进前**的边界余量，`min_clearance`/碰撞判定用**步进后**位置 ⇒ 含碰撞的批次里后者会偏低。**`h_min ≥ 0` 门禁保留且可用**；`min_clearance_global_min` 降级为环境侧事后量，不得与 `h_min` 相减 | 工具 `scripts/cbf_hmin_diag.py` + 离线复算（512 env × 600 步，`/tmp/navvel_g20/`） | 已写进 §0.5.9③ 与 §4.3 注 |
+| **G22** | **复现验收世界必须同时传 `seed` 与 `+set_seed`**：只传 `+set_seed=1011` 的诊断跑出 **0 个碰撞**，而真实 `s11_off` 同协议跑出 **3 个碰撞 env** | `[run]` `/tmp/navvel_g20/off512.log` vs `/tmp/navvel_p02/eval/s11_off.log` | 任何"复现验收"的脚本都要逐字对齐参数；诊断结论若依赖布局，必须先用 `layout_fp` 核对 |
 | **G21** | **批量脚本向子进程传相对路径会静默全挂**：`acceptance_eval.py` 的 worker 以 `cwd=scripts/` 跑 `eval_ckpt.py`，我传了相对 checkpoint ⇒ `FileNotFoundError`，6 次评估全失败；而 runner 只在末尾打 WARN，只看退出码不会发现 | `[run]` `/tmp/navvel_p02/eval/s11_on.log` 的 torch 栈 | 已在 `run_one()` 加 `os.path.abspath`；**约定：批量脚本向子进程传路径一律先 absolutize，且首次运行必须抽查子日志内容（grep 错误关键字），不能只看 `exit code`** |
 
 ### 1.5 现状的一句话总结
