@@ -1,6 +1,6 @@
 # NavVel 模型注册表（`NAVVEL_MODEL_REGISTRY.md`）
 
-> 版本 **2026-09-12 v1（新建，K1 入库动作）**。规范见 `NAVVEL_VERSION_AND_RETRAIN_PLAN.md` §2.5。
+> 版本 **2026-09-12 v2**（新建于 K1；v2 加入 P0.1 复现与 **P0.2 口径 A** 的成绩留档，见 §3.3/§3.4）。规范见 `NAVVEL_VERSION_AND_RETRAIN_PLAN.md` §2.5。
 >
 > **一行 = 一个 run group**（不是单个 seed）。成绩列一律 **3-seed 均值 ± 极差**，并指向被发布的那个 seed。
 > 状态机：`计划中 → 候选 → 验证中 → 现役 → 退役`。**产物不可变**；晋升/回滚只改
@@ -15,7 +15,7 @@
 | model_id | 状态 | obs | geometry_profile | 半径链 | arm / p | run group | ckpt sha256（前 12） | 阶段 1 验收 | 阶段 2 验收 |
 |---|---|---|---|---|---|---|---|---|---|
 | `navvel-cfb-v1.0.0-dual-p1-s11` | **现役**（验收不通过） | obs_v2 / 62 | `A0-legacy` | `r_s=r_o+0.20`、`r_cbf=r_o+0.30` | `dual` / always-on | `run-20260909_191309`（seed 11/12/13） | `4d604d6c30c9` | n/a（旧世界） | ✅**已测**：**不通过** ❌ |
-| `navvel-cfb-v1.1.0-dual-p1-s11` | 计划中（P0.2） | obs_v2 / 62 | `A`（口径 A） | `r_s=r_o+0.12`、`r_cbf=r_o+0.17` | `dual` / always-on | 待跑 | — | 待测 | 待测 |
+| `navvel-cfb-v1.1.0-dual-p1-s11` | **候选**（P0.2 已测，**未晋升**，阶段 2 不通过） | obs_v2 / 62 | `A`（口径 A） | `r_s=r_o+0.12`、`r_cbf=r_o+0.17` | `dual` / always-on | `run-20260912_203247` + `run-20260912_204807`（seed 11/12/13） | `e05eba92f4d5` | n/a（球近似） | ✅**已测**：**不通过** ❌（依赖度 0.8969 转红；见 §3.4） |
 | `navvel-cfb-v1.2.0-*-s*` | 计划中（P1 = A1a→A4） | obs_v2 / 62 | `A1a`…`A4` | `A` | 待定（沿用 `dual`） | 待跑 | — | 待测 | 待测 |
 | `navvel-cfb-v2.0.0-*-p*-s*` | 计划中（P4 = 1b 红线批） | obs_v3 / 114、K=12 | `A4` + 方体 SDF | `A` | P3 选出的最优臂 | 待跑 | — | 待测 | 待测 |
 
@@ -33,6 +33,16 @@
 | 13 | `run-20260909_191309-pczh85ou` | `cfb-dual-DR2-ctrlSync-3` | `524b6364bcb94fe2192e4c54f1a8c58b70c95362d04fbe33d82dd6270d504dd7` |
 
 `meta.json.sha256` == seed 11 的 `checkpoint_final.pt` ⇒ 交付产物确由 seed 11 导出（复核通过）。
+
+### 2.1 P0.2 批次种子哈希（`checkpoint_final.pt`，2026-09-12 复核）
+
+| seed | run_id | run_name | sha256 |
+|---|---|---|---|
+| 11 ✅发布 | `run-20260912_203247-7gziinv0` | `cfb-dual-chiA-p02-1-final` | `e05eba92f4d54b478b126397cc583f8edf9f2d7d403d95c872c08f0ff95236b1` |
+| 12 | `run-20260912_204807-njn50ubq` | `cfb-dual-chiA-p02-2-final2`（收尾 OOM 后单进程重跑） | `0ed7ce8e2274727e113be13061381b4caa5c05b2c9d9b7dd25083e89547c6019` |
+| 13 | `run-20260912_203247-51rmfdcr` | `cfb-dual-chiA-p02-3-final` | `6f8fb83b3240443e4df03960ea6170eb696fae075b890487a6dfd4d2bd040f33` |
+
+`meta.json.sha256` == seed 11 的 `checkpoint_final.pt` ⇒ v1.1.0 交付产物确由 seed 11 导出（复核通过）。
 
 ---
 
@@ -107,11 +117,45 @@
 
 ---
 
+### 3.4 P0.2 批次（口径 A → `navvel-cfb-v1.1.0-dual-p1-s11`）—— **候选，未晋升**（2026-09-12）
+
+| 项 | 值 |
+|---|---|
+| 批次 | P0.2（plan §3.1）—— `A` 3 seed 从**同一** `geo8` warm-start 续训 20M，训练变量与 P0.1 **逐字相同** |
+| wandb | `fly-hust` / `env_design_geo10_p01repro` / group `NavVel-P0.2-chiA` |
+| run group | `run-20260912_203247`（seed 11 `7gziinv0`、seed 13 `51rmfdcr`）+ `run-20260912_204807`（seed 12 `njn50ubq`，收尾 OOM 后单进程重跑） |
+| 几何 | `r_s = r_o+0.12`、`r_cbf = r_o+0.17`、`cbf_extra = 0.05`、`brake=false` |
+| 验收协议 | 与 P0.1 **逐字同构**：512 envs × 600 步、`set_seed=1000+train_seed`、`eval_points=fixed`、ON/OFF 同布局 |
+| 证据 | `navvel_export/navvel-cfb-v1.1.0-dual-p1-s11/`（`acceptance.md` + `eval_metrics.json` + `eval_logs/` + `SHA256SUMS` 16/16 ✅） |
+
+**结果（ON / OFF 3-seed 均值）**：
+
+| 指标 | v1.0.0（A0） | **v1.1.0（口径 A）** | Δ |
+|---|---|---|---|
+| `arrival@0.2` | 0.3412 / 0.3438 | **0.4733 / 0.4245** | **+0.1321** |
+| 零介入率 | 0.1613 | **0.2429** | **+0.0816** |
+| `corr_p50` | 0.6385 | 0.4678 | −0.1707 |
+| **依赖度** `OFF/ON` | 1.0076 ✅ | **0.8969 ❌** | 由过转不过 |
+| 0 碰 | ON 0 / OFF 1 | ON **0** / OFF **5** | 判撞半径已变，不可比 |
+| `h_min^train` | −0.0500 | 0.0000 | ⚠️ **G20：不计入结论** |
+
+**门禁**：依赖度 ❌、零介入率 ❌、`arrival@0.2` ❌、0 碰 ❌、`min d_min` ❌；0 OOB ✅、stall ✅、
+`dropped_relevant` ✅。⇒ **阶段 2 仍未通过，不晋升**（`_current` 仍指向 `v1.0.0`）。
+
+> **P0.2 的价值在于"标签含义变了"**：A0 那列的依赖度 PASS 是**饱和的**（滤波器做无用功），
+> 口径 A 把它变成**有信号**（撤掉滤波器到达率掉 10.3%）⇒ 依赖度转红不是退步，而是**失败原因
+> 变清晰**：策略确实依赖滤波器。这是 P3 的基准行。
+> **G20 提醒**：本模型 `h_min ≥ 0` 名义 PASS，但因与 `min_clearance − cbf_extra` 不自洽
+> （OFF 列实测 0.0000 vs 预测 −0.0041），**不得作为"策略更安全"的证据**（详见 plan §0.5.9③）。
+
+---
+
 ## 4. 三个锚点的当前状态（plan §2.3）
 
 | 锚点 | 位置 | 状态 |
 |---|---|---|
 | **训练锚** | git tag `navvel-cfb-v1.0.0` + `run_config.yaml` + wandb run id | ✅ tag 已打；`run_config.yaml` 已随产物入库；**algo 超参不在 `cfg/`**，来自代码 ConfigStore（`omni_drones/learning/ppo/ppo.py:59`），故由 tag→submodule commit 锚定 |
+| **训练锚（v1.1.0）** | submodule commit **`a845a4e`** + `cfg/profiles/A.yaml`（sha256 `fa9810668baa08ec…`）+ `run_config.yaml` + wandb run id | ✅ 三者齐备（见 `v1.1.0/lineage.json` 的 `anchors` 块）；`A.yaml` 由 `A0-legacy` **仅改 3 键**派生 |
 | **导出锚** | `navvel_export/<model_id>/` + `SHA256SUMS` + `meta.json` | ✅ |
 | **部署锚** | `navvel_deploy.yaml`（含 `model_id` + `sha256` + 几何常量） | ⛔ **仍缺**（G1：部署侧仓库不在本工作区）；P2/P4/P5 硬卡点 K6 |
 

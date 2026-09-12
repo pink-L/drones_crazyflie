@@ -35,7 +35,7 @@
 
 ## 0.5 K1 执行记录（2026-09-12）
 
-> **状态：K1 六项入库动作全部完成 ✅**，卡点 **K1 = 绿**。新增缺口 G13–G17（见 §1.4）。
+> **状态：K1 六项入库动作全部完成 ✅**，卡点 **K1 = 绿**。新增缺口 G13–G21（见 §1.4）。
 
 ### 0.5.1 已完成动作（对应 §2.7）
 
@@ -170,12 +170,14 @@ cd drones/OmniDrones/scripts
 | 1 | **`train.py` 调用 `setproctitle`** | 进程名变成 wandb `run_name`，`pgrep -f "train.py"` **找不到运行中的训练** ⇒ 我据此误判"训练已结束"，实际 3 个进程仍活着占 21 GiB | 用 `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader` 判定，再 `ps -p <pid> -o stat=,etime=,cmd=` |
 | 2 | **长任务不要 `wait`** | 之后在同一终端执行命令会连带 `wait` 及其子进程一起结束（进程无 traceback 直接消失） | `setsid nohup <cmd> > log 2>&1 < /dev/null &` + `disown -a`，把 pid 写入文件留档；**不 `wait`** |
 | 3 | **训练期间不要 import `omni_drones`**（含 `--cfg job`、导出脚本、CPU 单测） | 触发 kit/GPU 资源争用：运行中的训练会**静默卡死**（100% CPU 但不写 checkpoint），新进程报 PhysX 显存分配失败 | 训练窗口内只做 `nvidia-smi` / `tail` / `grep` 等轻量监控；所有 Isaac 相关命令排到训练之外 |
-| 4 | GPU 基线 | 3 seed × 1024 env 训练：**稳定后约 3.9 GiB/进程**（干净启动）；若看到 ~7 GiB/进程，说明有其它残留进程在抢显存 | 开训前先确认 `nvidia-smi` 无 compute apps |
+| 4 | GPU 基线（启动段） | 3 seed × 1024 env 训练：**稳定后约 3.9 GiB/进程**（干净启动）；若看到 ~7 GiB/进程，说明有其它残留进程在抢显存 | 开训前先确认 `nvidia-smi` 无 compute apps |
+| 5 | **长训练末期显存膨胀** ⇒ **并发上限是 2，不是 3** | 单进程显存随训练**单调增长**：~3.9 GiB（启动）→ **~11 GiB（20M 帧末端）**。3 路 ≈ 33 GiB > 32 GiB ⇒ P0.1 侥幸过关，P0.2 的 **s12 在最后一步崩**：`torch.OutOfMemoryError: Tried to allocate 364.00 MiB`，报 "Process 2918516 has 10.98 GiB / Process 2918518 has 10.98 GiB"，崩点在 `tensordict/_torch_func.py stack_fn` | **批次并发默认 `--parallel 2`**。必须 3 路时把 `task.env.num_envs` 降到 512（显存近半）。崩溃点在**收尾**，所以训练其实已跑完，只需单进程重跑该 seed |
 
 **作废的 run（仅留档，勿引用）**：
 第一次 `cfb-dual-chiA-p02-{1,2,3}` → `run-20260912_202653-{l6e8qgys,km9d5k5e,71obo25e}`（停在 6.58M 帧）；
-第二次 `cfb-dual-chiA-p02-r2-{1,2,3}` → `run-20260912_2030{40,40,43}-{zf5njn30,afzw0f99,st1go87f}`（仅启动即崩）。
-本地目录已归档到 `/tmp/navvel_p02/void_runs/`。
+第二次 `cfb-dual-chiA-p02-r2-{1,2,3}` → `run-20260912_2030{40,40,43}-{zf5njn30,afzw0f99,st1go87f}`（仅启动即崩）；
+第三次的 **s12 一支** `bq3qb0ej` 因坑 5 在收尾 OOM（s11/s13 正常出 final），已**单进程重跑**为
+`cfb-dual-chiA-p02-2-final2` → `njn50ubq`（见表 §0.5.8③）。本地目录已归档到 `/tmp/navvel_p02/void_runs/`。
 
 ### 0.5.8 P0.2（口径 A → `v1.1.0`）执行记录（2026-09-12）
 
@@ -234,7 +236,95 @@ run name `cfb-dual-chiA-p02-{1,2,3}-final`，run group **`run-20260912_203247`**
 （`7gziinv0` / `bq3qb0ej` / `51rmfdcr`）。
 > 前两次尝试的作废原因见 §0.5.7（环境坑，非配置问题）。
 
+**s12 单进程重跑**（因坑 5 收尾 OOM，见 §0.5.7）：`cfb-dual-chiA-p02-2-final2` → run **`njn50ubq`**
+（目录 `run-20260912_204807-njn50ubq`），单进程、其它参数逐字相同；日志尾
+`Final Eval at 19988480 steps` + `Saved checkpoint to .../checkpoint_final.pt`，无 error。
+
+**三个 seed 的产物（均为 `seed` 固定 + `total_frames=20M`）**：
+
+| train seed | wandb run | `checkpoint_final.pt` sha256 |
+|---|---|---|
+| 11 | `7gziinv0` | `e05eba92f4d54b478b126397cc583f8edf9f2d7d403d95c872c08f0ff95236b1` |
+| 12 | `njn50ubq`（重跑） | `0ed7ce8e2274727e113be13061381b4caa5c05b2c9d9b7dd25083e89547c6019` |
+| 13 | `51rmfdcr` | `6f8fb83b3240443e4df03960ea6170eb696fae075b890487a6dfd4d2bd040f33` |
+
+（wandb 汇总里 `env_frames = 19 988 480` 略小于 `20M`，是 update 粒度对齐所致，与 P0.1 的
+`19693568` 帧存档点同源，三 seed 一致。）
+
 **④ 结果**：见 §0.5.9。
+
+---
+
+### 0.5.9 P0.2 结果（2026-09-12）—— 口径 A 相对 A0 的收益与代价 **均已量化**
+
+**① 验收评估**：6 次（3 seed × ON/OFF），协议与 P0.1 **逐字同构**（`512 envs × 600 步`、
+`set_seed=1000+train_seed`、`eval_points=fixed`、ON/OFF 配对同一布局），6/6 `exit=0`，
+`cbf_diag_steps = 307200 = 600×512`（覆盖全部步，非抽样）。`layout_fp` 同 seed 的 ON/OFF 完全一致。
+
+| 指标（ON / OFF 均值） | **v1.0.0**（A0-legacy，`r_cbf=r_o+0.30`） | **v1.1.0**（口径 A，`r_cbf=r_o+0.17`） | Δ |
+|---|---|---|---|
+| `arrival@0.2` | 0.3412 / 0.3438 | **0.4733 / 0.4245** | **+0.1321** / +0.0807 |
+| 零介入率 | 0.1613 / 0.1951 | **0.2429** / 0.2656 | **+0.0816** |
+| `corr_p50`（中位修正） | 0.6385 / 0.6974 | **0.4678** / 0.5187 | **−0.1707** |
+| **filter 依赖度** `OFF/ON` | **1.0076 ✅ PASS** | **0.8969 ❌ FAIL** | **−0.1107（由过转不过）** |
+| `collision_envs` ON / OFF | 0 / 1 | **0 / 5**（s11:3、s12:2） | 判撞半径 0.20→0.12，**不可比** |
+| `h_min^train` | −0.0500 | 0.0000 | ⚠️ 见 ③ |
+| `stall_frac` / `dropped_relevant` | 0.0132 / 0.0000 | 0.0127 / 0.0001 | ≈ / ≈ |
+| `min_clearance_global_min` | 0.0512 / 0.0492 | 0.0508 / 0.0459 | ≈ |
+| `oob_envs_ever` / `crash_envs_ever` | 0 / 0 | **0 / 0** | ✅ |
+
+**门禁（§4.1/§4.3）**：依赖度 ❌、零介入率 ❌、`arrival@0.2 ≥ 0.85` ❌、0 碰 ❌（OFF 5 个 env）、
+0 OOB ✅、`stall ≤ 10%` ✅、`dropped_relevant < 1%` ✅、`h_min ≥ 0` ⚠️（名义 PASS，按 ③ 不计入）
+
+**② 解读 —— 这是本批次最有价值的产出**
+
+1. **口径 A 显著"松绑"了滤波器**：`r_cbf` 收到 `r_o+0.17` 后介入减少约 40%（零介入率 0.16→0.24），
+   中位修正幅度 0.64→0.47 m/s，**到达率 +13.2 个百分点**。与 §0.5.5 的机制解释自洽：A0 的保守球
+   几乎每步都绑定约束，扣掉的多是**无用的法向速度**。
+2. **依赖度由"过"转"不过"**——**不要读成"变差"**。P0.1 的 1.0076 之所以过关，恰恰是因为滤波器
+   **对任务结果毫无贡献**；口径 A 下撤掉滤波器到达率掉 10.3% ⇒ 滤波器**有真实贡献**。
+   ⇒ 阶段 2 的命题（撤 filter 可飞）不但**更明确地不成立**，而且**失败原因从"滤波器无用"变成了
+   "策略确实依赖滤波器"** —— 这正是 **P3** 要内化的东西，P0.2 为 P3 提供了一个**有信号、未饱和**
+   的对照起点（A0 那一列是饱和的：依赖度 1.0076 已经把"滤波器无用"顶到天花板）。
+3. OFF 出现 5 个碰撞 env 而 ON 全 0（同批次内可比）⇒ 一致支持"策略未内化安全"。
+4. `dropped_relevant ≈ 0` ⇒ K=8 窗口在 M=28 下未把危险障碍挤出窗口，**§3.2 的"K 容量不足"风险在
+   A 仍未出现**；`A3/A4` 柱数翻倍后必须重测（G8/G9）。
+
+**③ ⚠️ 新发现的口径缺陷 G20 —— 不许把 `h_min ≥ 0` 当证据**
+
+理论上应严格满足 `h_min = min_clearance − cbf_extra`（两把尺子只差标量 `cbf_extra`）。实测：
+
+| 批次 | `cbf_extra` | `min_clearance`(ON) | 预测 | 实测 `h_min` | 一致？ |
+|---|---|---|---|---|---|
+| v1.0.0 | 0.10 | 0.0512 | −0.0488 | −0.0500 | ✅ 差 0.0012 |
+| v1.1.0 ON | 0.05 | 0.0508 | +0.0008 | 0.0000 | ✅ 差 0.0008 |
+| **v1.1.0 OFF** | 0.05 | 0.0459 | **−0.0041** | **0.0000** | ❌ **方向相反** |
+
+**已排除**（本次实测）：诊断抽样（`cbf_diag_steps=307200=600×512`，覆盖全部步）；
+障碍集合口径（CPU 探针实测 `ObstacleManager.pos=(4,28,3)`、`r_safe=(4,28)`，而 `max_slots=8`
+**只截 obs 块**，滤波器拿到的是全部 28 个障碍 ⇒ 与 `min_clearance` 同集合）。
+**待查**（P1 开训前必须定论）：`ep_min_clearance` 的重置时机/窗口；滤波器算 `h` 用的无人机位置
+是否与 `update_min_clearance` 同一步；`r_safe` 与 `clearances()` 自算 r_s 是否同值。
+**处置**：`v1.1.0` 的 `h_min≥0` **名义 PASS 但不计入结论**；建议 P1 前把安全门禁改挂
+**`min_clearance`（全障碍、全步）**，`h_min` 暂降级为诊断量。
+
+**④ 交付物**：`/home/lz/lzspace/navvel_export/navvel-cfb-v1.1.0-dual-p1-s11/`
+（`navvel_actor.ts`/`obs_test.npy`/`action_test_server.npy`/`cbf_test.npz`/`meta.json` +
+`run_config.yaml` + `eval_metrics.json` + `eval_logs/`（6 个）+ `train_s12_retry.log` +
+`acceptance.md` + `lineage.json` + `SHA256SUMS`（**16/16 校验通过**））。
+导出：TorchScript vs 参考 `max|Δ| = 0.000e+00`；`meta.json` 向后兼容（差异全为新增键 + 口径 A 的
+3 个几何键 + 3 个随 run 变化的键）；`meta.sha256 == seed 11` ckpt 哈希 ✅。
+**`_current` 仍指向 `v1.0.0`**（阶段 2 未通过 ⇒ 不晋升；`v1.1.0` 状态 = 候选）。
+
+**⑤ 本批次带出的新缺口**：**G20**（上述 `h_min` 口径不一致，见 ③）。
+另记录 **G21**：`scripts/acceptance_eval.py` 之前把**相对路径** checkpoint 透传给以
+`cwd=scripts/` 运行的 worker，导致 6 次评估全部 `FileNotFoundError` 静默失败（日志里只有
+torch 栈，`acceptance_eval` 只在末尾打 WARN）⇒ 已加 `os.path.abspath` 保护；**凡批量脚本向子进程
+传路径一律先 absolutize**，且首次运行必须抽查子日志而非只看退出码。
+
+**⑥ 结论**：`v1.1.0` = **候选，未晋升**。P0.2 达成了它的设计目的：**隔离"几何口径"这一个变量**，
+量化其收益（+13.2 pt 到达率、−40% 介入）与代价（依赖度转红，暴露了真实的 filter 依赖），
+为 P1（几何泛化）与 P3（撤 filter）提供了可比的、未饱和的起点。
 
 ---
 
@@ -357,6 +447,8 @@ run name `cfb-dual-chiA-p02-{1,2,3}-final`，run group **`run-20260912_203247`**
 | **G17** | ~~**`scripts/wandb/` 被 `.gitignore`（OmniDrones/.gitignore:135 `wandb/`）** ⇒ 全部 `checkpoint_final.pt` 只存在于磁盘单点，无备份、无校验清单~~ **⚠️ 2026-09-12 复核后降级**：`train.py:262-270` 会把最终 checkpoint 作为 **wandb artifact `NavVel-ppo`** 上传（同时 run files 里也传 `config.yaml`/`output.log`）⇒ **存在异地副本**，风险远低于原描述 | `[fs]` `git check-ignore -v` + `[code]` `train.py` + P0.1 日志 `uploading artifact NavVel-ppo` | 剩余缺口仅"无本地归档/校验清单" —— 本轮已把 sha256 写进注册表与 `lineage.json`、并在各 `SHA256SUMS` 中留档 |
 | **G18** | `scripts/arena1_layout_check.py`（CPU 单测）**当前必崩**：`torch.as_tensor(task.fixed_init, ...)` 遇到仓库默认 `cfg/task/NavVel.yaml` 的 `fixed_init: null` | `[fs]` 实跑 `TypeError: must be real number, not NoneType` @ line 27 | 与本次改动**无关**（K5 未触碰该文件/该键）；但会让 CPU 回归套件常红 ⇒ 建议加 `None` 守卫或改从 profile 读 |
 | **G19** | **`OmniDrones/.gitignore:150` 忽略 `*.sh`** ⇒ 本仓库内 shell 脚本无法入库（本轮 runner 因此改写为 Python） | `[fs]` `git check-ignore -v` | 后续若需 shell 工具，要么 `git add -f`，要么写 `.py`（已按后者处理） |
+| **G20** | **`h_min^train` 与 `min_clearance − cbf_extra` 不一致**（P0.2 的 OFF 列：预测 −0.0041、实测 0.0000，方向相反）⇒ **`h_min ≥ 0` 这条安全门禁目前不可作为证据**。已排除诊断抽样（`cbf_diag_steps=307200=600×512`）与障碍集合（CPU 探针：`pos=(4,28,3)`、`max_slots=8` 只截 obs 块）两种解释 | `[run]` P0.2 六个 `eval_metrics.json` × P0.1 基线 × `/tmp/navvel_p02/probe_obstacle_shapes.py` | **P1 开训前必须定论**（见 §0.5.9③）：查 `ep_min_clearance` 的重置窗口 / 滤波器算 `h` 用的位置是否与 `update_min_clearance` 同一步 / `r_safe` 与 `clearances()` 的 r_s 是否同值。**临时处置**：安全门禁改挂 `min_clearance`（全障碍、全步），`h_min` 降级为诊断量 |
+| **G21** | **批量脚本向子进程传相对路径会静默全挂**：`acceptance_eval.py` 的 worker 以 `cwd=scripts/` 跑 `eval_ckpt.py`，我传了相对 checkpoint ⇒ `FileNotFoundError`，6 次评估全失败；而 runner 只在末尾打 WARN，只看退出码不会发现 | `[run]` `/tmp/navvel_p02/eval/s11_on.log` 的 torch 栈 | 已在 `run_one()` 加 `os.path.abspath`；**约定：批量脚本向子进程传路径一律先 absolutize，且首次运行必须抽查子日志内容（grep 错误关键字），不能只看 `exit code`** |
 
 ### 1.5 现状的一句话总结
 
