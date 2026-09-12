@@ -160,10 +160,85 @@ cd drones/OmniDrones/scripts
 **证据**：`navvel_export/navvel-cfb-v1.0.0-dual-p1-s11/repro_p01/`
 （`REPRO.md` + 3 份训练日志 + 6 份评估日志 + `eval_metrics.json` + `SHA256SUMS`，全部 `sha256sum -c` 通过）。
 
+### 0.5.7 执行注意（本机环境坑，2026-09-12 实测记录）
+
+> P0.2 的**前两次尝试**因此作废：第一次静默卡死在 6.58M/20M 帧，第二次因 `PhysX PxgCudaDeviceMemoryAllocator failed to allocate memory` 崩溃。
+> 两者都不是配置问题，而是**进程/资源管理**问题，记录以免重犯：
+
+| # | 坑 | 现象 | 正确做法 |
+|---|---|---|---|
+| 1 | **`train.py` 调用 `setproctitle`** | 进程名变成 wandb `run_name`，`pgrep -f "train.py"` **找不到运行中的训练** ⇒ 我据此误判"训练已结束"，实际 3 个进程仍活着占 21 GiB | 用 `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader` 判定，再 `ps -p <pid> -o stat=,etime=,cmd=` |
+| 2 | **长任务不要 `wait`** | 之后在同一终端执行命令会连带 `wait` 及其子进程一起结束（进程无 traceback 直接消失） | `setsid nohup <cmd> > log 2>&1 < /dev/null &` + `disown -a`，把 pid 写入文件留档；**不 `wait`** |
+| 3 | **训练期间不要 import `omni_drones`**（含 `--cfg job`、导出脚本、CPU 单测） | 触发 kit/GPU 资源争用：运行中的训练会**静默卡死**（100% CPU 但不写 checkpoint），新进程报 PhysX 显存分配失败 | 训练窗口内只做 `nvidia-smi` / `tail` / `grep` 等轻量监控；所有 Isaac 相关命令排到训练之外 |
+| 4 | GPU 基线 | 3 seed × 1024 env 训练：**稳定后约 3.9 GiB/进程**（干净启动）；若看到 ~7 GiB/进程，说明有其它残留进程在抢显存 | 开训前先确认 `nvidia-smi` 无 compute apps |
+
+**作废的 run（仅留档，勿引用）**：
+第一次 `cfb-dual-chiA-p02-{1,2,3}` → `run-20260912_202653-{l6e8qgys,km9d5k5e,71obo25e}`（停在 6.58M 帧）；
+第二次 `cfb-dual-chiA-p02-r2-{1,2,3}` → `run-20260912_2030{40,40,43}-{zf5njn30,afzw0f99,st1go87f}`（仅启动即崩）。
+本地目录已归档到 `/tmp/navvel_p02/void_runs/`。
+
+### 0.5.8 P0.2（口径 A → `v1.1.0`）执行记录（2026-09-12）
+
+**① 快照派生：`cfg/profiles/A.yaml`**
+
+用 `scripts/make_geometry_profile.py` 新增的 **派生模式**从 `A0-legacy` 复制后**只改指定键**：
+
+```bash
+python scripts/make_geometry_profile.py --from-profile cfg/profiles/A0-legacy.yaml \
+  --profile-id A \
+  --set obstacle.drone_radius=0.10 --set obstacle.inflation=0.02 \
+  --set cbf.r_safety_margin=0.05 --set cbf.use_brake_term=false \
+  --out cfg/profiles/A.yaml
+```
+
+* 工具会打印**实际发生变化的键**（未变的 `--set` 不会被记成改动）：本次为 **3 个键** ——
+  `obstacle.drone_radius 0.15→0.10`、`obstacle.inflation 0.05→0.02`、`cbf.r_safety_margin 0.10→0.05`
+  （`cbf.use_brake_term` 本来就是 `false`，故无变化）。
+* **独立复核**：`diff` 两份 profile 的 YAML 只有 **3 行**；再经 **hydra 组合后**逐键比对**也正好 3 行**。
+* `obstacle.collision_margin` **保持 0.05**（D-1）；其余 142 个 leaf key 与 `A0-legacy` 逐位相同。
+* 半径链（本地实跑 `omni_drones.utils.cbf` 复核）：**`r_s = r_o + 0.12`、`r_cbf = r_o + 0.17`** ✅ 与计划一致。
+* ⚠️ **判撞口径也变了**：`r_s` 从 `r_o+0.20` 降到 `r_o+0.12` ⇒ P0.2 的"0 碰"与 P0.1 **不可直接比较**
+  （这正是 §0.5.1 决策 3 要单独成批隔离口径 A 的原因）。`arrival` / 零介入率 / `h_min` 定义不变，
+  仍可比。
+
+**② 导出脚本 v2（配置驱动）—— 已完成并通过回归**（§2.4 红线）
+
+v1 把整套 v1.0.0 几何（0.15/0.05/0.10、4×4 柱的固定 xy、K=8、T=1500 …）**硬编码**在脚本里；
+口径 A 改了半径链，而 `r_cbf` 要写进 `meta.json` / `cbf_test.npz` 给部署侧 ⇒ **必须参数化**。改动：
+
+| 项 | v1 | v2 |
+|---|---|---|
+| 几何/控制常量 | 硬编码 | 从 **profile 或 run `config.yaml`** 读（`--profile`，两种格式都认，自动解 wandb 的 `{value:}` 包裹） |
+| 测试障碍布局 | 手写 4 柱 xy + 12 个固定自由球 | 用 env 自己的 **`ObstacleManager.sample_layout`（CPU）** 采样 ⇒ 布局天然与训练同规则、结构合法 |
+| `obs_dim` / `K` / `obstacle_cfg` | 62 / 8 / 固定 | 由配置推导；`obs_safety != none` 显式报错（本导出器不镜像安全通道） |
+| `meta.json` | — | **纯增量**：保留全部 v1 键与取值（`arena_bound_xy` 仍为标量、`cbf.r_si` 键名保留、`r_cbf` 文案在 brake-off 时逐字复现），只新增 `model_id`/`geometry_profile`/`test_vectors` 等 |
+
+> 实现细节：障碍模块用 `importlib` **按文件加载**（与 `scripts/pillar_geometry_test.py` 同法），
+> 因为走包路径会执行 `envs/single/__init__.py` → 拉入 Isaac Sim（无 `SimulationApp` 会失败）。
+
+**回归证据（v1.0.0 配置 + v1.0.0 权重）**：
+
+| 检查 | 结果 |
+|---|---|
+| 旧 `navvel_actor.ts` vs 已提交 `action_test_server.npy`（同一 `obs_test.npy` 输入） | `max|Δ| = 0.000e+00` |
+| **新** `navvel_actor.ts` vs 已提交 `action_test_server.npy` | `max|Δ| = 0.000e+00` |
+| 新旧 TorchScript 在同一 obs 上互相比较 | `max|Δ| = 0.000e+00` |
+| `filter_velocity` 重算已提交 `cbf_test.npz` 的 `v_safe` / `fix_norm` | `max|Δ| = 0.0` |
+| `meta.json` geometry/cbf 块 | 17 处差异**全部是新增键**，无一处改值 |
+| `meta.json` 丢失的顶层键 | 0（schema 向后兼容） |
+
+**③ 训练**：`task=profiles/A`，与 P0.1 **完全相同的 6 项非 task 参数**（`seed=11/12/13`、
+`algo.entropy_coef=0.05`、`total_frames=20M`、`save_interval=100`、`+render_eval=false`、
+`+init_ckpt=<geo8>`），wandb `fly-hust/env_design_geo10_p01repro`、group `NavVel-P0.2-chiA`、
+run name `cfb-dual-chiA-p02-{1,2,3}-final`，run group **`run-20260912_203247`**
+（`7gziinv0` / `bq3qb0ej` / `51rmfdcr`）。
+> 前两次尝试的作废原因见 §0.5.7（环境坑，非配置问题）。
+
+**④ 结果**：见 §0.5.9。
+
 ---
 
 ## 1. 当前版本现状
-
 ### 1.1 交付物与谱系（已核实）
 
 | 项 | 值 | 来源 |
