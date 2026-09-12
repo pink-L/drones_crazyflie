@@ -173,6 +173,10 @@ cd drones/OmniDrones/scripts
 | 3b | **判断"训练是否卡死"要看 checkpoint 时间戳与日志字节数**，不能只看 fps 或行数 | 2026-09-12 我一度误判 A1a 慢了 15×（实际是**自己算错时钟**：`etime` 只有 2:48、已在 6.59M/19.69M 帧）。判据：`ls -l --time-style=+%T <run>/files/*.pt`（无新时间戳 = 可疑）+ `wc -c` 两次间隔比对 + `ps -o stat=,etime=,%cpu=`（`Rl` + ~140% CPU = 在算） | 三步都做完再判定；`Rl`+日志增长 ⇒ 正常 |
 | 4 | GPU 基线（启动段） | 3 seed × 1024 env 训练：**稳定后约 3.9 GiB/进程**（干净启动）；若看到 ~7 GiB/进程，说明有其它残留进程在抢显存 | 开训前先确认 `nvidia-smi` 无 compute apps |
 | 5 | **长训练末期显存膨胀** ⇒ **并发上限是 2，不是 3** | 单进程显存随训练**单调增长**：~3.9 GiB（启动）→ **~11 GiB（20M 帧末端）**。3 路 ≈ 33 GiB > 32 GiB ⇒ P0.1 侥幸过关，P0.2 的 **s12 在最后一步崩**：`torch.OutOfMemoryError: Tried to allocate 364.00 MiB`，报 "Process 2918516 has 10.98 GiB / Process 2918518 has 10.98 GiB"，崩点在 `tensordict/_torch_func.py stack_fn` | **批次并发默认 `--parallel 2`**。必须 3 路时把 `task.env.num_envs` 降到 512（显存近半）。崩溃点在**收尾**，所以训练其实已跑完，只需单进程重跑该 seed |
+| 6 | **`crashreporter` 行数 / `exit=-11` 不是失败判据**（代价 ~2 h，务必先读） | 本机 Isaac **在训练成功的 run 上退出时也会 segfault**：进程 `exit=-11`、日志里成片 `crashreporter` 行，**但训练已跑完且 `checkpoint_final.pt` 已写出**。2026-09-12 我据此把 A2 家族里**已经跑完的 run 全判成"崩溃"**，还顺手 kill 掉了健康的 run，制造了"A2 代码有 bug / 机器被污染"的错误结论 | **成功判据只能是 `checkpoint_final.pt` 是否存在**；`rc≠0 但有 ckpt` 记为 "teardown crash, result OK"。已固化进 `scripts/train_batch.py`（`clear_gpu()` 前/后按 PID 清场并打印 GPU 是否释放）。另：**检查也不能太早** —— `final_eval=0` 常常只是"日志还在长"，要配合 `ps`/时间戳一起看 |
+| 7 | **崩溃进程会"改名"存活**，`pkill -f train.py` 抓不到 | 崩掉的 Isaac 进程**不一定退出**：`setproctitle` 已把 cmdline 改成 wandb run 名（如 `NavVel-ppo/09-12_22-29`），它继续占 6–8 GiB，导致后续每个 run 都崩 | 用 `nvidia-smi --query-compute-apps=pid` 取 PID 再 `kill -9`。**反方向也要小心**：改用 PID 批量清场时会**误杀正在正常训练的进程**（我犯过，进一步加深误判） |
+
+**排查纪律（2026-09-12 用 2 h 换来）**：遇到"某配置必崩"时，**第一件事是跑一个已知能跑的对照组**（同代码、同脚本、只改一个变量）。我在 A2 上做了 5 轮变体（`A2z`/`A2l`/`A2z0`…）才想起跑 A1b 对照，而 A1b 在同样条件下同样报 `exit=-11` ⇒ 一步就能把矛头指向**判据/环境**而不是代码。此外每轮实验后**必须 `nvidia-smi` 确认没留下僵尸**。
 
 **作废的 run（仅留档，勿引用）**：
 第一次 `cfb-dual-chiA-p02-{1,2,3}` → `run-20260912_202653-{l6e8qgys,km9d5k5e,71obo25e}`（停在 6.58M 帧）；
@@ -542,6 +546,59 @@ s13 `run-20260912_220442-y9u1hco4`（`e3c194a2d7e3ee57…`）。
 显存/耗时影响可忽略（观测 +26%，物理与障碍数不变）。
 > 注意：**无法在不重训的前提下做 K=12 的端到端冒烟**（现有 ckpt 的 actor 输入固定 62 维），
 > 所以 K=12 的首个验证点就是 A3 的首个训练 run。
+
+### 0.5.13 P1-A2 的"必崩"根因（2026-09-12）—— **PhysX GPU 接触/patch 池容量被人为收紧**
+
+**结论先行**：A2 的"33 s 段错误"**不是**布局代码的问题、**不是**柱层重叠、**不是**预留/停车槽位、**也不是**"槽位数 M 偏大"本身，而是
+`cfg/base/sim_base.yaml` 的 `gpu_max_rigid_patch_count: 163840`（**上游默认 `33554432` 被注释掉，容量被人为调小约 200×**）在 1024 env 下被**接触 patch 数量撑爆**。PhysX 先报
+
+```
+PhysX error: Unexpectedly unregistered an interaction that does not have a valid interaction ID.
+```
+
+再在 `sim.step()` 内部**原生段错误**：3/3 次崩溃的 py-spy 栈完全一致 —— `isaac_env.py:270` → `simulation_context.step()` → `physics_context._step()`，即**崩在 PhysX 里，不在我们的代码里**。这正是 §3.2 为 A3 预告过的隐患（"确认 1024 env 下不 OOM、**物理不炸（`sim.gpu_*` 容量）**"），只是提前一步在 A2 撞上了。
+
+#### ① 二分实验（每例 1024 env / 400k 帧 / seed 11 / ~1.7 min）
+
+| case | 柱×层 | M | 停车槽 | 逻辑层重叠 | PhysX 报错 | 结果 |
+|---|---|---|---|---|---|---|
+| `p2_L6` | 2×6 | 12 | 0 | 高 | 0 | ✅ |
+| `ctrl/ctrl2_A1b`、`A2z0`、`A2z` | 4×4 | 16 | 0 | 47% | 0 | ✅ |
+| `p4_L5` | 4×5 | 20 | 0 | 高 | 0 | ✅ |
+| `deep16`（`r=0.8`，层几乎完全重合） | 4×4 | 16 | 0 | **~90%** | 0 | ✅ |
+| `thin6` | 4×6 | **24** | **0** | ~0 | 15 | ❌ |
+| `p6_L4` | **6×4** | **24** | **0** | 中 | 13 | ❌ |
+| `A2l` / `A2` | 4×2–6 | **24** | 有 | 高 | 18–23 | ❌ |
+| `A0`（uniform 路径） | 4×4 + 12 自由球 | 28 | 0 | 47% | 0 | ✅ |
+
+判定逻辑：**M=28 稳而 M=24 崩** ⇒ 不是"槽位数"；**90% 重叠稳而 ~0% 重叠崩** ⇒ 不是"层重叠"；**零停车槽也崩** ⇒ 不是"停车槽位"。剩下唯一与全部 12 个数据点一致的量是**每 env 的接触 patch 数**：`163840 / 1024 = 160 patches/env`，而 M=20 约在 144 以下、M=24 约 168 以上。（`deep16` 的 4 层完全重合只算 1 处重叠，故仍在线下。）
+
+#### ② 修复（**纯缓冲容量，数值中性**）
+
+`gpu_max_rigid_patch_count: 163840 → 2097152`、`gpu_max_rigid_contact_count: 524288 → 2097152`（= 2048 patches/env，对 A3 的 M=48 最坏情况仍有约 6× 余量）。
+改动文件：`cfg/base/sim_base.yaml` + `cfg/profiles/{A,A1a,A1b,A2,A3}.yaml`。**`A0-legacy.yaml` 一字节未动**（它是 `v1.0.0` 的冻结锚点，sha256 属于 K1 溯源；且它在 M=28 下只有约 40 patches/env，本就在旧上限之下）—— **若将来提高 A0-legacy 的障碍数，必须同步提容量**。
+
+#### ③ 验证（实跑，不靠推断）
+
+1. **数值不变性**：同一条 A1b 400k/seed11 命令，patch 前后各跑一次，ckpt **逐位相同**：
+
+   | ckpt | patch 前 | patch 后 |
+   |---|---|---|
+   | `checkpoint_32768.pt` | `5b0f4c7f64d2696a…` | `5b0f4c7f64d2696a…` ✅ |
+   | `checkpoint_final.pt` | `cae36ac63f562ab9…` | `cae36ac63f562ab9…` ✅ |
+
+   ⇒ **P0.1 的逐位复现、P0.2/`v1.1.0`、A1a、A1b 全部结果依然有效**，本修复按"非语义基础设施改动"处理（提交信息里写明）。
+2. **可训性**：原先必崩的两个 M=24 世界现在都能训完且 **PhysX 报错归零**：
+   `p6_L4`（6×4）`rc=0 physx_err=0 ckpt=YES`；`profiles/A2` 原样（4×2–6）`rc=0 physx_err=0 ckpt=YES`。
+
+#### ④ 记录与纠错（代价约 2 h，写下来避免重犯）
+
+- 我在本轮**一度给出过错误结论**（"A2 布局代码有 bug / 机器被污染 / 停车位坐标导致"），并把**已经跑完的 run 判成崩溃**。原因有两条，已写进 §0.5.7 坑 6/坑 7：
+  1. **`crashreporter` 行数 / `exit=-11` 不是失败判据** —— 本机 Isaac 在**训练成功**的 run 上退出时也会 segfault，但 `checkpoint_final.pt` 已写出；
+  2. 崩溃进程会**改名存活**（`setproctitle` 把 cmdline 换成 wandb run 名），`pkill -f train.py` 抓不到，残留进程继续占显存；而我改用 PID 批量清场时又**误杀了正在正常训练的进程**。
+- **排查纪律**：遇到"某配置必崩"，**第一件事是跑已知能跑的对照组**（同代码同脚本只改一个变量）。我做了 5 轮 A2 变体才想起跑 A1b 对照，而 A1b 在同样条件下同样报 `exit=-11` ⇒ 一步就能把矛头指向**判据/环境**而非代码。每轮实验后必须 `nvidia-smi` 确认没留僵尸。
+- 提交：子模块 `eeacfc9`（容量修复）、`8aceb90`（停车位改动 + **更正其原 docstring 里被证伪的因果论断**）。
+- **A2 批次重跑**：tag `cfb-dual-chiA-a2d`（见 §0.5.14）。
 
 
 
