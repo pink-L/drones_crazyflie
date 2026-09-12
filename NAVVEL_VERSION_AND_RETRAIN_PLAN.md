@@ -379,6 +379,18 @@ torch 栈，`acceptance_eval` 只在末尾打 WARN）⇒ 已加 `os.path.abspath
   geo8 ckpt ⇒ 与 P0.2 口径 A 基线**真单变量**（只差"有无自由球"）。
   wandb：`fly-hust` / **新项目 `env_design_geo11_p1geom`** / group `NavVel-P1-A1a`，
   run name `cfb-dual-chiA-a1a-{11,12,13}-final`。
+
+**A1a 训练产物（2026-09-12 全部 `exit=0`）**
+
+| seed | run 目录 | 耗时 | `checkpoint_final.pt` sha256（前 16） |
+|---|---|---|---|
+| 11 | `run-20260912_213657-7uo1xlho` | 529 s | `a2fd56807718f31d…` |
+| 12 | `run-20260912_213657-ovfnhe7n` | 535 s | `d7cd481c784d54d9…` |
+| 13 | `run-20260912_214547-8ga2jpxv` | 353 s | `ca68f5c5c7cd7849…` |
+
+> `train_batch.py` 的 `find_final` 因按 `run_name: <name>` 精确匹配而**没能认领这三个 run**
+> （wandb dump 的 `config.yaml` 不是这个键写法）⇒ 已改为匹配裸 run 名。教训：**产物归属要用
+> 现成字段验证**，不能只看 runner 自己打印的 `ckpt=`。
 * 预期观察（§3.2 A1a 行）：`r_o` 通道仍 0.708（自由球半径档位与柱半径不同）；**CBF 介入率应下降**
   （障碍数 28→16，约束绑定概率降低）⇒ 零介入率应高于 0.2429；依赖度与 `arrival` 与 P0.2 逐项对照。
 * 验收：6 次（3 seed × ON/OFF），协议与 P0.1/P0.2 **逐字相同**（512×600、`set_seed=1000+seed`、
