@@ -732,6 +732,19 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 - CPU 门禁复核：`M=8`、8/8 槽全激活、净空/互距全 PASS（`profiles/A2L2`）。
 - **保守之处要说清**：`A2` 的"高度多样性"因此只剩 2 层的 z 随机跨度，且 `L` 从 4（A1b）降到 2 ⇒ 对 A1b 是"层数 + z 随机"两个变量，不再是严格单变量。这一点必须在 §0.5.15 的结果里声明。
 
+#### 0.6.3b 路线 C（**2026-09-14 新增，设计待审**）：障碍观测改"每柱一槽"
+
+> 来源：你的提问"现在对于障碍物的观测仍然是每层占一个 observation 的槽位吗，可以修改为每个柱作为一个整体占一个槽呢"。
+> 设计文档：**`plan_before/navvel_obs_per_pillar_design.md`**（含逐文件 diff 计划、代码骨架、测试与验收计划、风险与回退）。
+
+- **问题定性**：滑动窗口是在**槽位**上 `topk`，而槽位 = **一个球 = 一层** ⇒ 一根 6 层柱可占 8 个槽里的 6 个。所以**不是"K 太小"，而是"槽位粒度选错了"**：容量需求被算成 `柱数 × 每柱层数`（A3 = 48），而障碍物的真实语义单位是**柱**。
+- **关键事实（本轮新查证）**：CBF 球通道 `obstacle_cbf` 规格是 `(N, M, 4)` 且喂入**全部 M 槽**（`nav_vel.py:550-553` / `775-780`），**与 obs 的 K 窗口完全独立** ⇒ 本改造**只动策略观测，安全层/物理/奖励一行不改**。
+- **改动量**：约 **80–95 行**，集中在 2 个文件（`nav_vel_obstacles.py::build_obs` + 新增 `_build_pillar_id`；`eval_ckpt.py` 的诊断口径）；`nav_vel.py` **无需改**（`obstacle_obs_dim = 4*K` 不变）。
+- **是否红线**：**否** —— obs 维度仍 62、TorchScript 输入仍 `[1,62]` ⇒ 不需重导图、不需部署端改 obs 长度。但观测**语义**变 ⇒ 按 §2.x 属 **MINOR** ⇒ 建议 `v1.3.0`。
+- **最大收益**：观测需求与**层数解耦**，只与柱数相关 ⇒ `n_pillars_range=[2,8]`（你已定上界 = 8）**恰好压在 K=8 上**，`dropped_relevant ≡ 0` ⇒ **路线 A（K 8→12 红线）大概率就不需要了**。
+- **代价**：1a 全部需重训（≈1 h，与路线 A 同）；**部署侧 obs 组装需同步改**（K6 仓库仍不在本机，这是唯一真正卡交付链的项）。
+- **状态**：**等你审设计文档后定**（你已选"先出设计文档与 diff 计划给我审"）；**本轮不实施**。
+
 #### 0.6.4 交付账本（时间点 → 动作 → 证据 → 提交）
 
 > 目的：任何时刻都能回答"现在到哪一步、上一动作的证据在哪、对应哪个 commit"。
@@ -755,6 +768,10 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 | 2026-09-14 17:0x | **修门禁口径**：`dropped_relevant_gate` 拆为 `dropped_relevant_frac_gate` + `triggers` 块（卡点 4 ✅ 关闭） | `aggregate_acceptance_eval.py` 重跑输出 `[TRIGGERED] … = 0.1886` | 子模块 `3eae3e2` |
 | 2026-09-14 17:07 | **路线 B profile 入库**：`A2L2`（`A2` 单键 `pillar_layers_range=[2,2]`，M=8=K） | `cfg/profiles/A2L2.yaml`；CPU 门禁 `M=8` PASS | 子模块 `bf9c614` |
 | **2026-09-14 17:08 起** | **路线 B 批次开跑**：3 seed × 20M，`--parallel 2` | `/tmp/navvel_p1/a2L2/`；wandb group `NavVel-P1-A2L2` | （结果见 §0.5.15） |
+| 2026-09-14 17:1x | **A3 前置约束** `obstacle.min_active_slots`（防“观测窗口被 inf 填满”） | `omni_drones/envs/single/nav_vel_obstacles.py`；CPU 单测 `/tmp/navvel_a2dbg/test_min_active.py` | 子模块 `ad7a946` |
+| 2026-09-14 17:11 | A2L2 seed 11/12 训练完成（`ok=True`，537 s / 530 s） | `run-20260914_170755-oii6i57e`（`183b69f5…`）、`…_b6bukwjn`（`2bdfeef0…`） | — |
+| 2026-09-14 17:1x | 修 `clear_gpu()` 把“受保护的兄弟进程”误报为残留 | `scripts/train_batch.py` | 子模块 `64b8cf0` |
+| 2026-09-14 17:2x | **路线 C 设计文档**（每柱一槽：逐文件 diff 计划 + 代码骨架 + 测试/验收 + 风险/回退）—— **待审，未实施** | `plan_before/navvel_obs_per_pillar_design.md` | 外层（本次提交） |
 
 #### 0.6.5 下一步（按依赖顺序，**2026-09-14 17:1x 更新**）
 
@@ -766,11 +783,13 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
    - 采样侧的**瓶颈连通性门禁**：现在 `min_corridor` 是 **fail-fast**（未实现，见 §3.2/G8/G10）。`scripts/pillar_layout_check.py --connectivity --corridor-clearance W` 已有 CPU 侧实现，缺的是**采样器内部**的拒绝/重采样；
    - **最小激活槽数 ≥ K** 约束（否则 `inf` 填满窗口，等于白送 K 个空位）；
    - **M=48 的 3-iter smoke test**（容量已修，预期可过；这是 §3.2/G11 的硬要求）。
-4. **⚠️ 待你定的一个参数**：A3 的 `n_pillars_range` 上界保持 **8**（M=48）还是先收到 **6**（M=36）。注意若走路线 A（K=12），M=48 时窗口仍只覆盖 1/4 槽位。结合你的真机约束（**场地仅 3 m 高**），竖向堆叠不必高，所以"多柱 × 少层"比"少柱 × 多层"更贴近真实工况。
-5. **A3 批次**（3 seed × 20M）+ 6 次验收 + 与 A2/A2L2 单变量对照。
-6. **A4**（≥3 seed，建议 5）+ §4.2 全部门槛 ⇒ 阶段 1 交付冻结。
-7. **P3（阶段 2 第一轮）**：臂 × `p_filter` 矩阵（需新增 `p_filter` hook）。注意阶段 2 的两个门禁现在离得很远（0.5974 vs 0.95）—— **这是整个计划里最难的 1 项**。
-8. **✅ 已做（2026-09-14 17:1x）**：门禁口径修复（原第 6 项，卡点 4 已关闭）。
+4. **✅ 已定（2026-09-14）：A3 的 `n_pillars_range` 上界 = 8**（M = 8×6 = 48，按计划 §3.2）。若采用路线 C（每柱一槽），K=8 恰好满窗；若不用，M=48 时窗口只能覆盖 1/6 槽位。
+5. **✅ 已定（2026-09-14）：高度口径暂不动**（保持 `pillar_z_hi=2.6`、`edge_z_range=[0.4,2.4]`、柱 z 随机 `[[0.4,0.8],[2.2,2.6]]`），避免与 per-pillar obs / A3 同时改多个变量；将来要收进 3 m 包络时统一做。
+6. **A3 批次**（3 seed × 20M）+ 6 次验收 + 与 A2/A2L2 单变量对照。
+7. **A4**（≥3 seed，建议 5）+ §4.2 全部门槛 ⇒ 阶段 1 交付冻结。
+8. **P3（阶段 2 第一轮）**：臂 × `p_filter` 矩阵（需新增 `p_filter` hook）。注意阶段 2 的两个门禁现在离得很远（0.5974 vs 0.95）—— **这是整个计划里最难的 1 项**。
+9. **✅ 已做（2026-09-14 17:1x）**：门禁口径修复（原第 6 项，卡点 4 已关闭）。
+10. **⏸ 待你审**：路线 C 的 `plan_before/navvel_obs_per_pillar_design.md`（每柱一槽）—— 审过再决定是否实施。
 
 
 
