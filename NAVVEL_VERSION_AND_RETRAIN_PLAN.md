@@ -680,6 +680,7 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 > **机器状态（2026-09-14 17:00 复核）**：`nvidia-smi` 无 compute app、无残留 Isaac 进程；子模块 `a8cd6d6`、外层 `aef0232`，两仓工作区干净且均已推送；`cfg/profiles/A0-legacy.yaml` 仍为冻结原样（未受 §0.5.13 容量修复影响）；`/tmp/navvel_p1/{a1a,a1b,a2*,eval_a2}` 产物完整（`eval_a2/agg.json` + `SHA256SUMS` 均在场）。
 > **本节数值已于 2026-09-14 17:00 逐项回比 `eval_a2/agg.json`**：`arrival@0.2` ON 0.8340/OFF 0.7246、`dropped_relevant_step_frac` ON 0.1886/OFF 0.0217、`dropped_relevant_frac` ON 0.0032、`corr_p50` **双侧均 0.0**、碰撞/OOB/crash **全 0**、`h_min_train` 0.0001、`stall_frac` 0.0085 ⇒ 与 §0.6.1–§0.6.2 一致（门禁 5 过 3 不过：过 = `dropped_relevant`/`h_min`/`stall`/`zero_collision`/`zero_oob`，不过 = `arrival@0.2`/`filter_dependency`/`zero_intervention_rate`）。
 > ⚠️ **本节曾被编辑器旧缓冲覆盖 2 次，均已恢复**（第 2 次于 17:00 发现并恢复，丢弃工作区无内容损失）。教训见 §0.5.7 坑 10。
+> **2026-09-14 17:1x 追加**：收到你的三项决策（**走 B→A**、**现在就修门禁口径**、**真机场地仅 3 m 高 ⇒ 层数不必高**），门禁已修（子模块 `3eae3e2`），路线 B 的 `A2L2` profile 已入库（`bf9c614`）并**于 17:08 开跑 3×20M**（见 §0.6.3/§0.6.5）。本节其余数字仍是 17:00 快照。
 
 #### 0.6.1 现在训练到哪一步了（阶段 1a 阶梯）
 
@@ -695,15 +696,15 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 
 **一句话**：阶段 1a 已走到第 5 个阶梯（A2 完成）；`arrival@0.2` 单点最好 **0.8340**（门槛 0.85，差 1.6 pt），且 ON/OFF 双侧均 **0 碰撞 / 0 OOB / 0 crash**；**阶段 2 仍差很远**（零介入率 0.5974 ≪ 门禁 0.95）。
 
-#### 0.6.2 当前四个卡点
+#### 0.6.2 当前四个卡点（第 4 项已于 **2026-09-14 17:1x 修复**）
 
 1. **阶段 1 差 1.6 pt，且原因已量化**：`dropped_relevant_step_frac` ON **0.1886** vs OFF 0.0217（**8.7×**）⇒ 滤波 ON 时无人机贴近柱体，`K=8` 观测窗口被同柱多层占满，"相关但看不见"的障碍大量出现。
 2. **计划 §3.2 的 K 升级判据已被触发**（`dropped_relevant > 1%` 的步占比）：A1b 2.95%、A2 **18.86%** ⇒ **远超触发线**；A3（M=48）只会更糟。
 3. **几何本身在 `r=0.4243` 下不成立**：z 跨度约 1.4 m 里塞 6 层 ⇒ 层间距仅 0.19 m 而球直径 0.85 m ⇒ **重叠约 78%、近乎退化**（这正是撑爆 PhysX patch 池的根因，§0.5.13）。按"非重叠"算，该 z 跨度最多容纳 **2 层**。
-4. **（2026-09-14 10:15 新发现）门禁口径与计划判据"同名不同义"，会把触发盖成 PASS**：`aggregate_acceptance_eval.py` 的 `dropped_relevant_gate<0.01` 判的是 **`dropped_relevant_frac`**（*逐障碍*比例，A2 ON = **0.0032** ⇒ 门禁 **PASS**），而 §3.2 写的升级判据是 **`dropped_relevant_step_frac`**（*逐步*占比，A2 ON = **0.1886** ⇒ **远超 1% 触发线**）。两者名字都以 `dropped_relevant` 开头，但一个问"有多少障碍被丢"、一个问"有多少步丢了障碍"，量级差 **约 60×**。**结论不变（判据确已触发）
-，但命名与门禁必须修** —— 否则以后会看到 PASS 而错过触发。
+4. **（2026-09-14 10:15 发现）门禁口径与计划判据"同名不同义"，会把触发盖成 PASS**：`aggregate_acceptance_eval.py` 的 `dropped_relevant_gate<0.01` 判的是 **`dropped_relevant_frac`**（*逐障碍*比例，A2 ON = **0.0032** ⇒ 门禁 **PASS**），而 §3.2 写的升级判据是 **`dropped_relevant_step_frac`**（*逐步*占比，A2 ON = **0.1886** ⇒ **远超 1% 触发线**）。两者名字都以 `dropped_relevant` 开头，但一个问"有多少障碍被丢"、一个问"有多少步丢了障碍"，量级差 **约 60×**。**结论不变（判据确已触发），但命名与门禁必须修**。
+   → **✅ 已修（2026-09-14 17:1x，子模块 `3eae3e2`）**：门禁更名为 `dropped_relevant_frac_gate<0.01`（名副其实）；新增 `out["triggers"]` 块承载计划判据 `K_escalation_step_frac>0.01`，在 **`triggers (plan 3.2 - decisions, not pass/fail)`** 标题下以 `[TRIGGERED]` / `[not triggered]` 输出，并**并列给出 ON/OFF 两个量**。在 A2 日志上重跑的输出：`[TRIGGERED] K escalation rule: dropped_relevant_step_frac(ON) = 0.1886 (threshold 0.01)`。
 
-#### 0.6.3 两条路线（待选）
+#### 0.6.3 两条路线（**已于 2026-09-14 决策：先 B→A**）
 
 | | **路线 B：限制同柱层数（保持 K=8）** | **路线 A：K 8→12（红线）** |
 |---|---|---|
@@ -717,6 +718,19 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 > **建议：先走路线 B**（15 min，可把 `dropped_relevant` 归零，并顺手修掉"几何退化"这个真问题），看 `arrival@0.2` 是否越过 0.85。
 > **若过** ⇒ 阶段 1 可在**不触发红线**的前提下收口，K 扩容留到 P4 按自己的理由决策；
 > **若仍不过**（或希望 A3/A4 的世界是"密度高、必须升 K"的）⇒ 走路线 A，并**一次性重跑 1a 阶梯**。
+
+**✅ 你的决策（2026-09-14）**：
+
+1. **走 B→A**：先花 ~15 min 跑路线 B；若 `arrival@0.2` 未越 0.85，再升 K（路线 A）。
+2. **层数不用高 —— 真机约束**：*"障碍物高度在实际飞行有限制，真实场地只有 3 m 的高度，所以层数可以不用太高，训练和评估时都可以调低高度"*。这条**从物理侧独立支持路线 B**：真实场地根本放不下高塔，压低层数不是"把题变简单"，而是**把题变真**。
+3. 门禁口径现在就修（已完成，见 §0.6.2 第 4 项）。
+
+**路线 B 的本次取值与理由**（profile `A2L2` = `A2` 单键 `pillar_layers_range [2,6] → [2,2]`）：
+
+- `L=2` ⇒ `M = 4×2 = 8 = K` ⇒ **`dropped_relevant` 按构造恒为 0**（8 个槽全在窗口内，不存在"相关但看不见"）；
+- `L=2` 时层间距 = 0.55–1.35 m，**≥ 球直径 0.85 m** ⇒ 球堆**不再重叠**，顺带修掉卡点 3（`A2` 的 2–6 层重叠最高 78%）。它恰好也是 `L_max = 1 + floor((z_hi−z_lo−2r)/2r)` 给出的"几何合法"上限；
+- CPU 门禁复核：`M=8`、8/8 槽全激活、净空/互距全 PASS（`profiles/A2L2`）。
+- **保守之处要说清**：`A2` 的"高度多样性"因此只剩 2 层的 z 随机跨度，且 `L` 从 4（A1b）降到 2 ⇒ 对 A1b 是"层数 + z 随机"两个变量，不再是严格单变量。这一点必须在 §0.5.15 的结果里声明。
 
 #### 0.6.4 交付账本（时间点 → 动作 → 证据 → 提交）
 
@@ -737,19 +751,26 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 | 2026-09-12 23:03–23:06 | A2 验收 6/6 `exit=0` → 门禁计算 | `/tmp/navvel_p1/eval_a2/`；§0.5.14 | 外层 `617d9cb` |
 | 2026-09-14 | 进度快照 §0.6 + 坑 8/9 | 本节 | 外层 `f00dc6b` |
 | 2026-09-14 10:15 | 复核更新（时间点/机器状态/卡点 4/本账本）+ 恢复第 1 次旧缓冲覆盖 | 本节；§0.5.7 坑 10 | 外层 `aef0232` |
-| **2026-09-14 17:00** | **恢复第 2 次旧缓冲覆盖**（丢弃工作区无损失：被删内容全在 HEAD）+ **逐项回比 `agg.json` 复核 A2 全部门禁与均值** + 确认 09-13 起未跑任何训练 | `git checkout HEAD -- NAVVEL_VERSION_AND_RETRAIN_PLAN.md`（行数 1347）；`/tmp/navvel_p1/eval_a2/agg.json` | 外层（本次提交） |
+| **2026-09-14 17:00** | **恢复第 2 次旧缓冲覆盖**（丢弃工作区无损失：被删内容全在 HEAD）+ **逐项回比 `agg.json` 复核 A2 全部门禁与均值** + 确认 09-13 起未跑任何训练 | `git checkout HEAD -- NAVVEL_VERSION_AND_RETRAIN_PLAN.md`（行数 1347）；`/tmp/navvel_p1/eval_a2/agg.json` | 外层 `aa22e8f` |
+| 2026-09-14 17:0x | **修门禁口径**：`dropped_relevant_gate` 拆为 `dropped_relevant_frac_gate` + `triggers` 块（卡点 4 ✅ 关闭） | `aggregate_acceptance_eval.py` 重跑输出 `[TRIGGERED] … = 0.1886` | 子模块 `3eae3e2` |
+| 2026-09-14 17:07 | **路线 B profile 入库**：`A2L2`（`A2` 单键 `pillar_layers_range=[2,2]`，M=8=K） | `cfg/profiles/A2L2.yaml`；CPU 门禁 `M=8` PASS | 子模块 `bf9c614` |
+| **2026-09-14 17:08 起** | **路线 B 批次开跑**：3 seed × 20M，`--parallel 2` | `/tmp/navvel_p1/a2L2/`；wandb group `NavVel-P1-A2L2` | （结果见 §0.5.15） |
 
-#### 0.6.5 下一步（按依赖顺序）
+#### 0.6.5 下一步（按依赖顺序，**2026-09-14 17:1x 更新**）
 
-1. **（待定）路线 B 或 A** —— 见 §0.6.3。
-2. **A3 前的三项准备**（与路线无关，可先做）：
+1. **✅ 已决策：走路线 B→A** —— 见 §0.6.3。
+2. **🔄 进行中（17:08 起）：路线 B 的 `A2L2` 批次**（3 seed × 20M）+ 6 次验收。判据：**`arrival@0.2 ≥ 0.85` 且 `dropped_relevant_step_frac ≈ 0`**。结果写 §0.5.15。
+   - 若**过** ⇒ 阶段 1 在不触发红线的条件下收口，K 扩容留给 P4；
+   - 若**不过** ⇒ 走路线 A（K 8→12 + 一次性重跑 1a 阶梯 ≈ 1–1.5 h）。
+3. **A3 前的三项准备**（与路线无关，可先做）：
    - 采样侧的**瓶颈连通性门禁**：现在 `min_corridor` 是 **fail-fast**（未实现，见 §3.2/G8/G10）。`scripts/pillar_layout_check.py --connectivity --corridor-clearance W` 已有 CPU 侧实现，缺的是**采样器内部**的拒绝/重采样；
    - **最小激活槽数 ≥ K** 约束（否则 `inf` 填满窗口，等于白送 K 个空位）；
    - **M=48 的 3-iter smoke test**（容量已修，预期可过；这是 §3.2/G11 的硬要求）。
-3. **A3 批次**（3 seed × 20M）+ 6 次验收 + 与 A2 单变量对照。
-4. **A4**（≥3 seed，建议 5）+ §4.2 全部门槛 ⇒ 阶段 1 交付冻结。
-5. **P3（阶段 2 第一轮）**：臂 × `p_filter` 矩阵（需新增 `p_filter` hook）。注意阶段 2 的两个门禁现在离得很远（0.5974 vs 0.95）—— **这是整个计划里最难的 1 项**。
-6. **修掉门禁口径（卡点 4）**：把 `aggregate_acceptance_eval.py` 的 `dropped_relevant_gate` 明确区分 `dropped_relevant_frac`（逐障碍）与 `dropped_relevant_step_frac`（逐步），并在输出里同时给两个值 + 同时给"逐步 > 1%"的触发标记。**与路线选择无关，可随时做（~5 min）**。
+4. **⚠️ 待你定的一个参数**：A3 的 `n_pillars_range` 上界保持 **8**（M=48）还是先收到 **6**（M=36）。注意若走路线 A（K=12），M=48 时窗口仍只覆盖 1/4 槽位。结合你的真机约束（**场地仅 3 m 高**），竖向堆叠不必高，所以"多柱 × 少层"比"少柱 × 多层"更贴近真实工况。
+5. **A3 批次**（3 seed × 20M）+ 6 次验收 + 与 A2/A2L2 单变量对照。
+6. **A4**（≥3 seed，建议 5）+ §4.2 全部门槛 ⇒ 阶段 1 交付冻结。
+7. **P3（阶段 2 第一轮）**：臂 × `p_filter` 矩阵（需新增 `p_filter` hook）。注意阶段 2 的两个门禁现在离得很远（0.5974 vs 0.95）—— **这是整个计划里最难的 1 项**。
+8. **✅ 已做（2026-09-14 17:1x）**：门禁口径修复（原第 6 项，卡点 4 已关闭）。
 
 
 
