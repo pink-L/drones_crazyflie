@@ -177,7 +177,7 @@ cd drones/OmniDrones/scripts
 | 7 | **崩溃进程会"改名"存活**，`pkill -f train.py` 抓不到 | 崩掉的 Isaac 进程**不一定退出**：`setproctitle` 已把 cmdline 改成 wandb run 名（如 `NavVel-ppo/09-12_22-29`），它继续占 6–8 GiB，导致后续每个 run 都崩 | 用 `nvidia-smi --query-compute-apps=pid` 取 PID 再 `kill -9`。**反方向也要小心**：改用 PID 批量清场时会**误杀正在正常训练的进程**（我犯过，进一步加深误判） |
 | 8 | **`wandb.mode=disabled` 的 run 目录不在 `scripts/wandb`** | 调试用 `train.py ... wandb.mode=disabled` 时，checkpoint 落在 **`/tmp/wandb/run-*/files/`**（`scripts/wandb` 里没有）⇒ 只查 `scripts/wandb/run-*` 会把"已跑完"误判成"没产出" | 找 ckpt **两个根都查**：`scripts/wandb/run-*`（online）与 `/tmp/wandb/run-*`（disabled）。`train_batch.find_final()` 只查前者——因为批量跑一律 `wandb.mode=online` |
 | 9 | **批量清场不能"见到显存里的进程就杀"** | `train_batch` 的 parent 只是调度器：每个 seed 是一个 `--child` 进程，各自在启动前调 `clear_gpu()` ⇒ 它会杀掉**同批仍在收尾的兄弟 seed 的 `train.py`**。实测 `cfb-dual-chiA-a2d` 的 `seed 11 rc=-9`（只因 ckpt 已写出才没丢结果） | parent 公布 `NAVVEL_BATCH_ROOT`，`clear_gpu()` 按 `/proc/<pid>/stat` 的 PPID 链**保护**仍连到该根的所有 GPU 进程，只清"脱钩残留"（崩溃 seed 的 `train.py` 被 reparent 到 init 后即失去该祖先链）。已修：子模块 `a8cd6d6` |
-| 10 | **编辑器旧缓冲会把已提交的文档整体回退** | 2026-09-14 实测：一次保存把 `NAVVEL_VERSION_AND_RETRAIN_PLAN.md` 写成"`f00dc6b` 之前"的版本（少 55 行 = §0.6 + 坑 8/9），工作区内容**恰好等于上一提交 `617d9cb`** | 判别：`git --no-pager diff --stat <上一提交> -- <file>` **输出为空** ⇒ 就是旧缓冲覆盖（不是有意修改）。恢复：`git checkout HEAD -- <file>`（内容已在 HEAD 且已推送，不会丢）。**文档类长期编辑建议每段落一段就提交一次**，降低覆盖损失面 |
+| 10 | **编辑器旧缓冲会把已提交的文档整体回退**（**已发生 2 次**） | 2026-09-14 实测 2 次：第 1 次把 `NAVVEL_VERSION_AND_RETRAIN_PLAN.md` 写成"`f00dc6b` 之前"的形态（少 **55 行** = §0.6 + 坑 8/9）；同日 17:00 又发生第 2 次，写成**更早**的形态（相对 `aef0232` 少 **26 行** = §0.6.4 账本 + 坑 10 + 卡点 4）。**两次的净效果都是"丢掉 HEAD 里已有的整段章节"** | ⚠️ **判别法不能用"与上一提交 diff 为空"**：第 2 次实测 `git diff --stat 617d9cb -- <file>` = **+57/−2（非空）**，因为旧缓冲是**更早、但并不恰好等于某次提交**的形态。可靠判据是**内容特征**：(a) 差异表现为**整节凭空消失**（§0.6.4、坑 10 这类完整小节），而非逐句修改；(b) 消失的内容**已在 HEAD 且已推送**；(c) 你不会有意删它。恢复：`git checkout HEAD -- <file>` —— **丢弃工作区无损失**，被删内容全在 HEAD（第 2 次已这么处理并核对行数 1347）。**对策：文档每写完一个 § 就提交一次**，把损失面压到一个 § |
 
 **排查纪律（2026-09-12 用 2 h 换来）**：遇到"某配置必崩"时，**第一件事是跑一个已知能跑的对照组**（同代码、同脚本、只改一个变量）。我在 A2 上做了 5 轮变体（`A2z`/`A2l`/`A2z0`…）才想起跑 A1b 对照，而 A1b 在同样条件下同样报 `exit=-11` ⇒ 一步就能把矛头指向**判据/环境**而不是代码。此外每轮实验后**必须 `nvidia-smi` 确认没留下僵尸**。
 
@@ -676,9 +676,10 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
 
-> **时间点标注**：本节初版写成于 **2026-09-14**（提交 `f00dc6b`），并于 **2026-09-14 10:15** 复核更新。上一次实际跑训练/评估是 **2026-09-12 23:06**（A2 验收 6/6 完成，见 §0.5.14）；**2026-09-13 ~ 2026-09-14 10:15 之间未跑任何训练**（GPU 空闲）。
-> 机器状态（2026-09-14 10:15 复核）：`nvidia-smi` 无 compute app、无残留 Isaac 进程；两仓均已推送、工作区干净（子模块 `a8cd6d6`；外层 `f00dc6b` + 本节更新提交）；`cfg/profiles/A0-legacy.yaml` 仍为冻结原样（未受 §0.5.13 容量修复影响）。
-> ⚠️ **本节曾被编辑器旧缓冲覆盖，已恢复**：09-14 的一次保存把工作区文件写成了"`f00dc6b` 之前"的版本（少 **55 行**，即本节 + §0.5.7 坑 8/9），工作区内容恰好等于上一提交 `617d9cb`。已 `git checkout HEAD --` 恢复并核对行数。教训见 §0.5.7 坑 10。
+> **时间点标注**：本节初版写成于 **2026-09-14**（提交 `f00dc6b`），**2026-09-14 10:15** 第 1 次复核，**2026-09-14 17:00** 第 2 次复核（= 本节当前版本）。上一次实际跑训练/评估是 **2026-09-12 23:06**（A2 验收 6/6 完成，见 §0.5.14）；**2026-09-13 至 2026-09-14 17:00 之间未跑任何训练**（GPU 全程空闲）。
+> **机器状态（2026-09-14 17:00 复核）**：`nvidia-smi` 无 compute app、无残留 Isaac 进程；子模块 `a8cd6d6`、外层 `aef0232`，两仓工作区干净且均已推送；`cfg/profiles/A0-legacy.yaml` 仍为冻结原样（未受 §0.5.13 容量修复影响）；`/tmp/navvel_p1/{a1a,a1b,a2*,eval_a2}` 产物完整（`eval_a2/agg.json` + `SHA256SUMS` 均在场）。
+> **本节数值已于 2026-09-14 17:00 逐项回比 `eval_a2/agg.json`**：`arrival@0.2` ON 0.8340/OFF 0.7246、`dropped_relevant_step_frac` ON 0.1886/OFF 0.0217、`dropped_relevant_frac` ON 0.0032、`corr_p50` **双侧均 0.0**、碰撞/OOB/crash **全 0**、`h_min_train` 0.0001、`stall_frac` 0.0085 ⇒ 与 §0.6.1–§0.6.2 一致（门禁 5 过 3 不过：过 = `dropped_relevant`/`h_min`/`stall`/`zero_collision`/`zero_oob`，不过 = `arrival@0.2`/`filter_dependency`/`zero_intervention_rate`）。
+> ⚠️ **本节曾被编辑器旧缓冲覆盖 2 次，均已恢复**（第 2 次于 17:00 发现并恢复，丢弃工作区无内容损失）。教训见 §0.5.7 坑 10。
 
 #### 0.6.1 现在训练到哪一步了（阶段 1a 阶梯）
 
@@ -735,7 +736,8 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 | 2026-09-12 22:48–23:03 | **A2 重跑成功**（3/3 seed 跑完 20M） | `run-20260912_224820-hagpq5y8` / `…_224821-gt5rzce5` / `…_225726-9edt4cgf` | — |
 | 2026-09-12 23:03–23:06 | A2 验收 6/6 `exit=0` → 门禁计算 | `/tmp/navvel_p1/eval_a2/`；§0.5.14 | 外层 `617d9cb` |
 | 2026-09-14 | 进度快照 §0.6 + 坑 8/9 | 本节 | 外层 `f00dc6b` |
-| 2026-09-14 10:15 | 复核更新（时间点/机器状态/卡点 4/本账本）+ 恢复旧缓冲覆盖 | 本节 | 外层（本次） |
+| 2026-09-14 10:15 | 复核更新（时间点/机器状态/卡点 4/本账本）+ 恢复第 1 次旧缓冲覆盖 | 本节；§0.5.7 坑 10 | 外层 `aef0232` |
+| **2026-09-14 17:00** | **恢复第 2 次旧缓冲覆盖**（丢弃工作区无损失：被删内容全在 HEAD）+ **逐项回比 `agg.json` 复核 A2 全部门禁与均值** + 确认 09-13 起未跑任何训练 | `git checkout HEAD -- NAVVEL_VERSION_AND_RETRAIN_PLAN.md`（行数 1347）；`/tmp/navvel_p1/eval_a2/agg.json` | 外层（本次提交） |
 
 #### 0.6.5 下一步（按依赖顺序）
 
