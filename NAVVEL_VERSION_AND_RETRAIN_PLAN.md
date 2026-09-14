@@ -754,7 +754,7 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 **④ 地平线无关的速度指标（已实现，`d6f8f6f`）**
 `arrival@0.2` 一旦地平线足够长就饱和（0.9974），**无法再区分阶梯**。因此新增**与 rollout 长度无关**的指标：env 自身按 **episode 相对步**记录的 `stats["first_arrival_step"]`（首次到达的 `progress_buf` 步数，0 = 从未到达）。报告 `arrival_steps_{median,mean,p90,n}`（`eval_ckpt.py` + `aggregate_acceptance_eval.py`，包在 `try/except` 里，**永不阻断验收**）。这是**长地平线协议下的阶梯判别量**。
 
-**⑤ 路线 C 的 CPU 级决定性证据（**变体 (a)**）**
+**⑤ 路线 C 的 CPU 级决定性证据（变体 (a)）**
 同一场景（一根柱的 6 层都在无人机附近 + 3 根远柱）：
 
 ```
@@ -764,6 +764,18 @@ obs_per_pillar=True  -> valid slots 4, pillar ids [0,3,2,1]           （每柱 
 
 ⇒ 修好了"**一根柱吃掉整个窗口**"这个表征缺陷。**默认关闭**（`obstacle.obs_per_pillar=false`）⇒ 冻结世界（v1.0.0/v1.1.0）与 A1a/A1b/A2/A2L2/A2L3 的既有结果**不受影响**。设计见 `plan_before/navvel_obs_per_pillar_design.md`（MINOR 版本 ⇒ 实施后为 `v1.3.0`）。
 ⚠️ **交付链路依赖**：`navvel_actor.ts` 的 obs 布局随路线 C **改变** ⇒ 部署侧必须同步；而 **K6（部署仓库）目前仍不存在**，是路线 C 唯一真正的交付链依赖。
+
+**⑤-b 路线 C 的两个实验各查什么（**这句话改变了 `A2P` 的性质，2026-09-14 澄清**）**
+
+先做错过的直觉：`A2P` = `A2` + `obs_per_pillar=true`（已生成，`cfg/profiles/A2P.yaml`，与 `A2` **逐值相同**，只多一个键）看上去是"路线 C 的端点验证"。但按现在的证据，它其实是**风险测试**而不是**收益测试**：
+
+| 实验 | 世界 | 逐柱槽位数 | 它真正回答的问题 |
+|---|---|---|---|
+| `A2P` | `A2`（M=24，**有缝**） | 4 根柱 → 4 槽（其余 4 槽空） | **逐柱折叠会不会在"柱真的是两片圆盘"时丢掉另一片的危险？** 这是一个**危害测试**：缝是**物理真实**的，把一根柱压成一个槽，确实可能看不见上下另一片 |
+| `A3` + `obs_per_pillar=true` | `A3`（M=48，8 根柱） | 8 根柱 → 8 槽（**恰好满窗**） | **收益测试**：这才是路线 C 真正要解决的问题（M=48 时逐层窗口只能覆盖 1/6 槽位） |
+
+⇒ **必须纠正一处早期说法**：`A2P` 的 `dropped_relevant` 会**按构造**趋近 0（一根柱只要有任一层在危险半径内就被算作"相关"，而逐柱窗口里它必占一槽）⇒ **该指标在 `A2P` 上不可用作"路线 C 有效"的证据**。`A2P` 能提供证据的只有**行为量**：`arrival@0.2`、**碰撞数**、`arrival_steps_median/p90`。若 `A2P` 的碰撞数**上升**，就说明"逐柱折叠 + 有缝柱"确实会丢危险 ⇒ 那些被丢掉的正是 §0.5.16⑥ 里"几何非法"的账。
+⇒ 因此：**路线 C 的合法收口是 `A2L3`（连续柱）不出问题 + `A3` 用逐柱观测把 8 根柱塞进 K=8**；`A2P` 只作为一个"最坏情况"参照点。
 
 **⑥ 柱连续性 CPU 门禁（已实现，`fa84c66`）**
 `scripts/pillar_layout_check.py` 新增：**逐 env** 计算相邻层最坏间距 / (2r)，`> 1` 即 **FAIL**（`--allow-discontinuous` 可对冻结的 legacy profile opt-out）。实测：
