@@ -177,6 +177,7 @@ cd drones/OmniDrones/scripts
 | 7 | **崩溃进程会"改名"存活**，`pkill -f train.py` 抓不到 | 崩掉的 Isaac 进程**不一定退出**：`setproctitle` 已把 cmdline 改成 wandb run 名（如 `NavVel-ppo/09-12_22-29`），它继续占 6–8 GiB，导致后续每个 run 都崩 | 用 `nvidia-smi --query-compute-apps=pid` 取 PID 再 `kill -9`。**反方向也要小心**：改用 PID 批量清场时会**误杀正在正常训练的进程**（我犯过，进一步加深误判） |
 | 8 | **`wandb.mode=disabled` 的 run 目录不在 `scripts/wandb`** | 调试用 `train.py ... wandb.mode=disabled` 时，checkpoint 落在 **`/tmp/wandb/run-*/files/`**（`scripts/wandb` 里没有）⇒ 只查 `scripts/wandb/run-*` 会把"已跑完"误判成"没产出" | 找 ckpt **两个根都查**：`scripts/wandb/run-*`（online）与 `/tmp/wandb/run-*`（disabled）。`train_batch.find_final()` 只查前者——因为批量跑一律 `wandb.mode=online` |
 | 9 | **批量清场不能"见到显存里的进程就杀"** | `train_batch` 的 parent 只是调度器：每个 seed 是一个 `--child` 进程，各自在启动前调 `clear_gpu()` ⇒ 它会杀掉**同批仍在收尾的兄弟 seed 的 `train.py`**。实测 `cfb-dual-chiA-a2d` 的 `seed 11 rc=-9`（只因 ckpt 已写出才没丢结果） | parent 公布 `NAVVEL_BATCH_ROOT`，`clear_gpu()` 按 `/proc/<pid>/stat` 的 PPID 链**保护**仍连到该根的所有 GPU 进程，只清"脱钩残留"（崩溃 seed 的 `train.py` 被 reparent 到 init 后即失去该祖先链）。已修：子模块 `a8cd6d6` |
+| 9b | **验收 eval 在渲染器初始化阶段空转（GPU 0% 而进程上千% CPU）** | 2026-09-14 实测：A2L2 的验收 eval **两次都卡死**（`--parallel 2` 与 `--parallel 1` 各一次）。症状：日志在启动后 **~11 s 停止增长**；`vkCreateRayTracingPipelinesKHR failed` + `PsoRaytracing::buildPipeline()` 断言 **×544**；进程 `Rl`、**CPU 1500–2800%**、但 **GPU 利用率 0%**（显存已分配）。**对照组**：当天 6 个训练日志、以及本机 09-12 成功的同类 eval 日志，`graphics-vulkan`/`rtx.psodb` 错误**均为 0** | **判据：`nvidia-smi` 的 GPU util = 0% 而 CPU 上千%** + 日志停在启动阶段 + `graphics-vulkan`/`rtx.psodb` 报错 ⇒ "**根本没在算**"，与坑 3b（"在算但没写 ckpt"）是两回事。已排除：`/dev/shm`（仅 1%）、磁盘（7%）、并发（串行同样卡）。失败点在**渲染器初始化**（早于任何 env/profile 代码）⇒ 与 profile/ckpt 无关。当前判定为**机器级渲染/驱动状态问题**（X 服务器已无进程，`/tmp/.X11-unix/X1001` 是 09-09 的残留 socket）⇒ 需**重启整机**恢复。⚠️ **该故障会挡住所有验收 eval（训练不受影响）** |
 | 10 | **编辑器旧缓冲会把已提交的文档整体回退**（**已发生 2 次**） | 2026-09-14 实测 2 次：第 1 次把 `NAVVEL_VERSION_AND_RETRAIN_PLAN.md` 写成"`f00dc6b` 之前"的形态（少 **55 行** = §0.6 + 坑 8/9）；同日 17:00 又发生第 2 次，写成**更早**的形态（相对 `aef0232` 少 **26 行** = §0.6.4 账本 + 坑 10 + 卡点 4）。**两次的净效果都是"丢掉 HEAD 里已有的整段章节"** | ⚠️ **判别法不能用"与上一提交 diff 为空"**：第 2 次实测 `git diff --stat 617d9cb -- <file>` = **+57/−2（非空）**，因为旧缓冲是**更早、但并不恰好等于某次提交**的形态。可靠判据是**内容特征**：(a) 差异表现为**整节凭空消失**（§0.6.4、坑 10 这类完整小节），而非逐句修改；(b) 消失的内容**已在 HEAD 且已推送**；(c) 你不会有意删它。恢复：`git checkout HEAD -- <file>` —— **丢弃工作区无损失**，被删内容全在 HEAD（第 2 次已这么处理并核对行数 1347）。**对策：文档每写完一个 § 就提交一次**，把损失面压到一个 § |
 
 **排查纪律（2026-09-12 用 2 h 换来）**：遇到"某配置必崩"时，**第一件事是跑一个已知能跑的对照组**（同代码、同脚本、只改一个变量）。我在 A2 上做了 5 轮变体（`A2z`/`A2l`/`A2z0`…）才想起跑 A1b 对照，而 A1b 在同样条件下同样报 `exit=-11` ⇒ 一步就能把矛头指向**判据/环境**而不是代码。此外每轮实验后**必须 `nvidia-smi` 确认没留下僵尸**。
@@ -674,6 +675,27 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 > **建议：在 A3 之前执行 K 8→12（obs 62→78 维）**。理由：A2 的结论已经把"A3 会被 obs 容量噪声淹没"这件事量化了 —— 不升 K，A3 要引入的拓扑/连通性变量无法与"看不见障碍"的干扰分离。
 > 代价（已复核，见 §0.5.12③）：`obstacle.max_slots=12` 是**纯配置**（`self.K = oc["max_slots"]`、`obs = 30+4K`，无需改代码），真实成本 = **重训** + **§2.4 红线重导/对拍** + **部署端 obs 长度同步（K6 仓库仍不在本机）**。
 
+### 0.5.15 P1-A2L2（路线 B）执行记录（**2026-09-14**）—— 训练完成，验收被环境故障阻塞
+
+**① 训练（✅ 完成）**：`A2L2` = `A2` 单键 `pillar_layers_range [2,6]→[2,2]`（M = 4×2 = **8 = K**）。
+
+| seed | wandb run | 耗时 | `checkpoint_final.pt` sha256（前 16） |
+|---|---|---|---|
+| 11 | `run-20260914_170755-oii6i57e` | 537 s | `183b69f5494d65f4` |
+| 12 | `run-20260914_170755-b6bukwjn` | 530 s | `2bdfeef04e8aaa3d` |
+| 13 | `run-20260914_171652-03msm7nr` | 359 s | `02a534736eea435a` |
+
+- 3/3 `ok=True`、`worst exit=0`；显存 ~7.2 GiB/进程；**训练日志内 Vulkan/PSO 错误 = 0**。
+- ⚠️ **必须声明的保守之处**：对 `A1b` 而言，`A2L2` 是"层数 4→2 **+** 逐柱 z 跨度随机"**两个变量**，不是严格单变量（与 §0.6.3 的理由一致）。
+
+**② 验收（⏸ 被环境故障阻塞，见 §0.5.7 坑 9b）**：6 次验收（3 seed × ON/OFF）**未能完成** —— eval 在**渲染器初始化**阶段空转（日志停在启动后 ~11 s；`vkCreateRayTracingPipelinesKHR failed` + `PsoRaytracing::buildPipeline` 断言 ×544；进程 `Rl`、CPU 1500–2800%、**GPU util 0%**）。
+已尝试并**已排除**：`--parallel 2`、`--parallel 1`（串行同样卡）、清理 `/dev/shm` 残留、按 PID 杀掉卡死进程后重跑。**下一步需重启整机**。
+两个作废的验收目录：`/tmp/navvel_p1/eval_a2L2/`、`/tmp/navvel_p1/eval_a2L2b/`（均**不可引用**）。
+
+**③ 预期（待验收后填）**：M = 8 = K ⇒ 观测窗口能装下全部槽位 ⇒ 预期 `dropped_relevant_step_frac ≈ 0`（**按构造**）、`arrival@0.2` 介于 A1b `0.8053` 与 A2 `0.8340` 之间或更高（世界更简单）。这是"**降低密度本身够不够**"的直接答案，与路线 C（每柱一槽）是两条**互补**验证 —— 路线 B 降低密度，路线 C 修正表征。
+
+---
+
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
 
 > **时间点标注**：本节初版写成于 **2026-09-14**（提交 `f00dc6b`），**2026-09-14 10:15** 第 1 次复核，**2026-09-14 17:00** 第 2 次复核（= 本节当前版本）。上一次实际跑训练/评估是 **2026-09-12 23:06**（A2 验收 6/6 完成，见 §0.5.14）；**2026-09-13 至 2026-09-14 17:00 之间未跑任何训练**（GPU 全程空闲）。
@@ -771,7 +793,9 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 | 2026-09-14 17:1x | **A3 前置约束** `obstacle.min_active_slots`（防“观测窗口被 inf 填满”） | `omni_drones/envs/single/nav_vel_obstacles.py`；CPU 单测 `/tmp/navvel_a2dbg/test_min_active.py` | 子模块 `ad7a946` |
 | 2026-09-14 17:11 | A2L2 seed 11/12 训练完成（`ok=True`，537 s / 530 s） | `run-20260914_170755-oii6i57e`（`183b69f5…`）、`…_b6bukwjn`（`2bdfeef0…`） | — |
 | 2026-09-14 17:1x | 修 `clear_gpu()` 把“受保护的兄弟进程”误报为残留 | `scripts/train_batch.py` | 子模块 `64b8cf0` |
-| 2026-09-14 17:2x | **路线 C 设计文档**（每柱一槽：逐文件 diff 计划 + 代码骨架 + 测试/验收 + 风险/回退）—— **待审，未实施** | `plan_before/navvel_obs_per_pillar_design.md` | 外层（本次提交） |
+| 2026-09-14 17:2x | **路线 C 设计文档**（每柱一槽：逐文件 diff 计划 + 代码骨架 + 测试/验收 + 风险/回退）—— **待审，未实施** | `plan_before/navvel_obs_per_pillar_design.md` | 外层 `1ca981a` |
+| **2026-09-14 17:08–17:23** | **A2L2 训练完成 3/3**（`worst exit=0`，见 §0.5.15①） | s11 `run-20260914_170755-oii6i57e` `183b69f5494d65f4…`（537 s）；s12 `…-b6bukwjn` `2bdfeef04e8aaa3d…`（530 s）；s13 `run-20260914_171652-03msm7nr` `02a534736eea435a…`（359 s） | — |
+| ⏸ **2026-09-14 17:24–17:31** | **A2L2 验收两次卡死在渲染器初始化**（坑 9b）：`--parallel 2` 与 `--parallel 1` 各一次；均 GPU 0% / CPU 上千% / 日志停住 | `/tmp/navvel_p1/eval_a2L2/`（作废）、`/tmp/navvel_p1/eval_a2L2b/`（作废） | — |
 
 #### 0.6.5 下一步（按依赖顺序，**2026-09-14 17:1x 更新**）
 
