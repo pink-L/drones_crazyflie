@@ -991,6 +991,45 @@ pillar count min/mean/max = 2/4.12/8      (~7 distinct values -> the randomizati
 
 ---
 
+### 0.5.20 P1-A3 执行记录（**2026-09-14 21:51 起**）—— 阶段 1a 的最后一档
+
+**① 配置**（`cfg/profiles/A3.yaml`，父本 `A2L3`）
+
+| 键 | 值 | 说明 |
+|---|---|---|
+| `n_pillars_range` | `[2, 8]` | 每 env 柱数随机（难度变化） |
+| `pillar_layers_range` | `[3, 6]` | **L ≥ 3 ⇒ 每根柱连续**（间距 = `(z_span−2r)/(L−1) ≤ 2r`） |
+| `obs_per_pillar` | **`true`** | **路线 C**：每根柱占 1 个 obs 槽 ⇒ 8 根柱恰好满 K=8 |
+| `min_corridor` | `1.34` | 瓶颈连通性门禁（60.4% 抽样可满足，逐 env 重抽） |
+| `min_active_slots` | 0（未设） | 逐柱模式下 `≥K` 会杀死柱数变化；风险改为**监视** |
+| `max_slots` (K) | 8 | ⇒ **obs 仍 62 维**，TorchScript 输入仍 `[1,62]` |
+| M | **48** | = `nP_max × L_max`（槽位预留；路线 C 下 M 不再是 K 的瓶颈） |
+
+**② Warm start**：`scripts/wandb/run-20260909_180042-r02a809m/files/checkpoint_19693568.pt`（sha256 前缀 `7e03babd6dd04f61a5bc3890`）—— **与 A1a/A1b/A2/A2L3 完全同一个**（已逐个核对各档 `config.yaml` 的 `init_ckpt`）⇒ **A3 与整条阶梯单变量可比**。
+
+**③ 启动命令**（`--parallel 2`，串行纪律：此批次运行期间**禁止任何 eval**）
+```
+cd /home/lz/lzspace/drones/OmniDrones
+setsid nohup python scripts/train_batch.py \
+  --profile profiles/A3 --group NavVel-P1-A3 --project env_design_geo11_p1geom \
+  --tag cfb-dual-chiA-a3 --seeds 11 12 13 --parallel 2 --logdir /tmp/navvel_p1/a3 \
+  > /tmp/navvel_p1/a3/batch.log 2>&1 < /dev/null & disown -a
+```
+
+**④ 启动后 75 s 健康检查（✅ 全部通过）**
+
+| 检查项 | 结果 |
+|---|---|
+| 两条 A3 专属初始化行 | ✅ `randomized pillars ON: … M=48 min_corridor=1.34` + **`obs_per_pillar ON: M=48 slots -> 8 groups (K=8)`** |
+| Python 异常 | **0**（两个 seed 日志均为 0） |
+| **PhysX `Unexpectedly unregistered`（M=24 时期的杀手）** | **0** ✅ |
+| ckpt 落盘 | ✅ `checkpoint_32768.pt`（21:51:54） |
+| 显存 | **7702 + 7754 = 15456 MiB / 32607 MiB**，GPU 86% ⇒ **M=48 × 2 路并发余量充足** |
+
+**⑤ 结果（待填）**：3 seed × 20M 的 `checkpoint_final.pt` sha256、耗时，以及随后 `512×{600,1500}` 双口径验收。
+
+---
+
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
 
 > **时间点标注**：本节初版写成于 **2026-09-14**（提交 `f00dc6b`），**2026-09-14 10:15** 第 1 次复核，**2026-09-14 17:00** 第 2 次复核（= 本节当前版本）。上一次实际跑训练/评估是 **2026-09-12 23:06**（A2 验收 6/6 完成，见 §0.5.14）；**2026-09-13 至 2026-09-14 17:00 之间未跑任何训练**（GPU 全程空闲）。
