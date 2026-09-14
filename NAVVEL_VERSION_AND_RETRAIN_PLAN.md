@@ -1110,11 +1110,13 @@ pillar count min/mean/max = 2/4.12/8      (~7 distinct values -> the randomizati
    - **`A2L2`（L=2）已作废**：几何非法（间距 1.585×2r，柱中间最大 1.34 m 缝），**用户已决定不重新验收**（见 §0.5.15④ / §0.5.16⑥）。
    - seed 13 ✅（`10461c24…`，353 s）；**seed 11/12 正在重训**（我先前的并发误操作把它们 OOM 杀了 —— 教训见 §0.5.7 坑 9c）。
    - 判据：`arrival@0.2` + **与地平线无关的 `arrival_steps_median/p90`** 双看；`dropped_relevant_step_frac ≈ 0` 已在该配置实测为 0。
-3. **A3 前的三项准备**（与路线无关，可先做）：
-   - 采样侧的**瓶颈连通性门禁**：现在 `min_corridor` 是 **fail-fast**（未实现，见 §3.2/G8/G10）。`scripts/pillar_layout_check.py --connectivity --corridor-clearance W` 已有 CPU 侧实现，缺的是**采样器内部**的拒绝/重采样；
-   - **最小激活槽数 ≥ K** 约束（否则 `inf` 填满窗口，等于白送 K 个空位）；
-   - **M=48 的 3-iter smoke test**（容量已修，预期可过；这是 §3.2/G11 的硬要求）。
-4. **✅ 已定（2026-09-14）：A3 的 `n_pillars_range` 上界 = 8**（M = 8×6 = 48，按计划 §3.2）。若采用路线 C（每柱一槽），K=8 恰好满窗；若不用，M=48 时窗口只能覆盖 1/6 槽位。
+3. **✅ A3 前的三项准备全部完成（2026-09-14 20:2x–21:1x）**：
+   - **✅ 采样侧的瓶颈连通性门禁已实现**（子模块 `bf63e51`）：`min_corridor` 不再是 fail-fast；判据 = "存在一条瓶颈净宽 ≥ W 的起点→终点通路"（与 `pillar_layout_check.py --connectivity` **同一判据**）；**逐 env 粘性拒绝**（整批 `ok.all()` 对 40% 的单 env 失败率无效）。详见 §0.5.18；
+   - **✅ 最小激活槽数**：用户决策 **保持 0**（逐柱模式下 `≥ K` 等价于"每个 env 必须 8 根柱"，会杀死 `n_pillars_range=[2,8]`）；该风险改为**监视** —— 新增 `ObstacleManager.pillar_counts()` + 验收报告里的 `active_pillars_{min,mean,max,distinct}`；
+   - **✅ M=48 的 smoke test 通过**（`exit=0`、**0 个 PhysX 交互错误**、训练正常推进、门禁生效、无 NaN）⇒ **PhysX 容量修复在 M=48 成立**。
+   - **✅ A3 profile 已重建并过门禁**（父本 `A2`→**`A2L3`**；`pillar_layers_range [3,6]` 保证连续；`obs_per_pillar=true`；`min_corridor=1.34`）。门禁：`0/4 failing`、**`0/4 connectivity failures`**、连续性 `0.771` 连续、柱数分布 `2/4.12/8`。
+   - ⚠️ 过程中发现并修掉 **5 个"仪器说谎"类 bug**（见 §0.5.19），其中一个会让 A3 报出 `dropped_relevant_step_frac = 0.90`（**真相 0.0**），即**把"路线 C 失败"这个完全错误的结论摆在面前**。
+4. **✅ 已定（2026-09-14）：A3 的 `n_pillars_range` 上界 = 8**；profile 已按此建好（`A3.yaml`）。注意：**路线 C 下 M 不再是"K 的瓶颈"** —— 逐柱观测只要求 `柱数 ≤ K=8`，M 只是槽位预留（`nP_max × L_max = 8×6 = 48`）。
 5. **✅ 已定（2026-09-14）：高度口径暂不动**（保持 `pillar_z_hi=2.6`、`edge_z_range=[0.4,2.4]`、柱 z 随机 `[[0.4,0.8],[2.2,2.6]]`），避免与 per-pillar obs / A3 同时改多个变量；将来要收进 3 m 包络时统一做。
 6. **A3 批次**（3 seed × 20M）+ 验收 + 与 `A2L3` 单变量对照（**`A2L2` 已作废，不再作为对照**）。
 7. **A4**（≥3 seed，建议 5）+ §4.2 全部门槛 ⇒ 阶段 1 交付冻结。
