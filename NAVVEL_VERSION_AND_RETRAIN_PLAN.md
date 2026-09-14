@@ -177,6 +177,7 @@ cd drones/OmniDrones/scripts
 | 7 | **崩溃进程会"改名"存活**，`pkill -f train.py` 抓不到 | 崩掉的 Isaac 进程**不一定退出**：`setproctitle` 已把 cmdline 改成 wandb run 名（如 `NavVel-ppo/09-12_22-29`），它继续占 6–8 GiB，导致后续每个 run 都崩 | 用 `nvidia-smi --query-compute-apps=pid` 取 PID 再 `kill -9`。**反方向也要小心**：改用 PID 批量清场时会**误杀正在正常训练的进程**（我犯过，进一步加深误判） |
 | 8 | **`wandb.mode=disabled` 的 run 目录不在 `scripts/wandb`** | 调试用 `train.py ... wandb.mode=disabled` 时，checkpoint 落在 **`/tmp/wandb/run-*/files/`**（`scripts/wandb` 里没有）⇒ 只查 `scripts/wandb/run-*` 会把"已跑完"误判成"没产出" | 找 ckpt **两个根都查**：`scripts/wandb/run-*`（online）与 `/tmp/wandb/run-*`（disabled）。`train_batch.find_final()` 只查前者——因为批量跑一律 `wandb.mode=online` |
 | 9 | **批量清场不能"见到显存里的进程就杀"** | `train_batch` 的 parent 只是调度器：每个 seed 是一个 `--child` 进程，各自在启动前调 `clear_gpu()` ⇒ 它会杀掉**同批仍在收尾的兄弟 seed 的 `train.py`**。实测 `cfb-dual-chiA-a2d` 的 `seed 11 rc=-9`（只因 ckpt 已写出才没丢结果） | parent 公布 `NAVVEL_BATCH_ROOT`，`clear_gpu()` 按 `/proc/<pid>/stat` 的 PPID 链**保护**仍连到该根的所有 GPU 进程，只清"脱钩残留"（崩溃 seed 的 `train.py` 被 reparent 到 init 后即失去该祖先链）。已修：子模块 `a8cd6d6` |
+| 10 | **编辑器旧缓冲会把已提交的文档整体回退** | 2026-09-14 实测：一次保存把 `NAVVEL_VERSION_AND_RETRAIN_PLAN.md` 写成"`f00dc6b` 之前"的版本（少 55 行 = §0.6 + 坑 8/9），工作区内容**恰好等于上一提交 `617d9cb`** | 判别：`git --no-pager diff --stat <上一提交> -- <file>` **输出为空** ⇒ 就是旧缓冲覆盖（不是有意修改）。恢复：`git checkout HEAD -- <file>`（内容已在 HEAD 且已推送，不会丢）。**文档类长期编辑建议每段落一段就提交一次**，降低覆盖损失面 |
 
 **排查纪律（2026-09-12 用 2 h 换来）**：遇到"某配置必崩"时，**第一件事是跑一个已知能跑的对照组**（同代码、同脚本、只改一个变量）。我在 A2 上做了 5 轮变体（`A2z`/`A2l`/`A2z0`…）才想起跑 A1b 对照，而 A1b 在同样条件下同样报 `exit=-11` ⇒ 一步就能把矛头指向**判据/环境**而不是代码。此外每轮实验后**必须 `nvidia-smi` 确认没留下僵尸**。
 
@@ -675,8 +676,9 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
 
-> **时间点标注**：本节于 **2026-09-14** 核对。上一次实际跑训练/评估是 **2026-09-12 23:06**（A2 验收 6/6 完成，见 §0.5.14）；**2026-09-13 ~ 09-14 之间未跑任何训练**。
-> 机器状态（2026-09-14 核对）：`nvidia-smi` 无 compute app、无残留 Isaac 进程；两仓工作区干净且均已推送（子模块 `a8cd6d6`、外层 `617d9cb`）；`cfg/profiles/A0-legacy.yaml` 仍为冻结原样（未受 §0.5.13 容量修复影响）。
+> **时间点标注**：本节初版写成于 **2026-09-14**（提交 `f00dc6b`），并于 **2026-09-14 10:15** 复核更新。上一次实际跑训练/评估是 **2026-09-12 23:06**（A2 验收 6/6 完成，见 §0.5.14）；**2026-09-13 ~ 2026-09-14 10:15 之间未跑任何训练**（GPU 空闲）。
+> 机器状态（2026-09-14 10:15 复核）：`nvidia-smi` 无 compute app、无残留 Isaac 进程；两仓均已推送、工作区干净（子模块 `a8cd6d6`；外层 `f00dc6b` + 本节更新提交）；`cfg/profiles/A0-legacy.yaml` 仍为冻结原样（未受 §0.5.13 容量修复影响）。
+> ⚠️ **本节曾被编辑器旧缓冲覆盖，已恢复**：09-14 的一次保存把工作区文件写成了"`f00dc6b` 之前"的版本（少 **55 行**，即本节 + §0.5.7 坑 8/9），工作区内容恰好等于上一提交 `617d9cb`。已 `git checkout HEAD --` 恢复并核对行数。教训见 §0.5.7 坑 10。
 
 #### 0.6.1 现在训练到哪一步了（阶段 1a 阶梯）
 
@@ -692,11 +694,13 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 
 **一句话**：阶段 1a 已走到第 5 个阶梯（A2 完成）；`arrival@0.2` 单点最好 **0.8340**（门槛 0.85，差 1.6 pt），且 ON/OFF 双侧均 **0 碰撞 / 0 OOB / 0 crash**；**阶段 2 仍差很远**（零介入率 0.5974 ≪ 门禁 0.95）。
 
-#### 0.6.2 当前三个卡点
+#### 0.6.2 当前四个卡点
 
 1. **阶段 1 差 1.6 pt，且原因已量化**：`dropped_relevant_step_frac` ON **0.1886** vs OFF 0.0217（**8.7×**）⇒ 滤波 ON 时无人机贴近柱体，`K=8` 观测窗口被同柱多层占满，"相关但看不见"的障碍大量出现。
 2. **计划 §3.2 的 K 升级判据已被触发**（`dropped_relevant > 1%` 的步占比）：A1b 2.95%、A2 **18.86%** ⇒ **远超触发线**；A3（M=48）只会更糟。
 3. **几何本身在 `r=0.4243` 下不成立**：z 跨度约 1.4 m 里塞 6 层 ⇒ 层间距仅 0.19 m 而球直径 0.85 m ⇒ **重叠约 78%、近乎退化**（这正是撑爆 PhysX patch 池的根因，§0.5.13）。按"非重叠"算，该 z 跨度最多容纳 **2 层**。
+4. **（2026-09-14 10:15 新发现）门禁口径与计划判据"同名不同义"，会把触发盖成 PASS**：`aggregate_acceptance_eval.py` 的 `dropped_relevant_gate<0.01` 判的是 **`dropped_relevant_frac`**（*逐障碍*比例，A2 ON = **0.0032** ⇒ 门禁 **PASS**），而 §3.2 写的升级判据是 **`dropped_relevant_step_frac`**（*逐步*占比，A2 ON = **0.1886** ⇒ **远超 1% 触发线**）。两者名字都以 `dropped_relevant` 开头，但一个问"有多少障碍被丢"、一个问"有多少步丢了障碍"，量级差 **约 60×**。**结论不变（判据确已触发）
+，但命名与门禁必须修** —— 否则以后会看到 PASS 而错过触发。
 
 #### 0.6.3 两条路线（待选）
 
@@ -713,7 +717,27 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 > **若过** ⇒ 阶段 1 可在**不触发红线**的前提下收口，K 扩容留到 P4 按自己的理由决策；
 > **若仍不过**（或希望 A3/A4 的世界是"密度高、必须升 K"的）⇒ 走路线 A，并**一次性重跑 1a 阶梯**。
 
-#### 0.6.4 下一步（按依赖顺序）
+#### 0.6.4 交付账本（时间点 → 动作 → 证据 → 提交）
+
+> 目的：任何时刻都能回答"现在到哪一步、上一动作的证据在哪、对应哪个 commit"。
+
+| 时间点 | 动作 | 证据 / 产物 | 提交 |
+|---|---|---|---|
+| 2026-09-12 | K1 六项入库 + `v1.0.0` tag | `navvel_export/navvel-cfb-v1.0.0-dual-p1-s11/`（`SHA256SUMS`/`lineage.json`）+ tag `navvel-cfb-v1.0.0` | 外层 `d47d87e` |
+| 2026-09-12 | P0.1 **逐位复现**（3 seed ckpt sha256 与交付完全相同） | `repro_p01/`；wandb `fly-hust/env_design_geo10_p01repro` | — |
+| 2026-09-12 | P0.2 → `v1.1.0`（口径 A；3×20M + 6 验收） | `navvel_export/navvel-cfb-v1.1.0-dual-p1-s11/`（19/19 校验通过）+ tag | 外层 `da75bbd` |
+| 2026-09-12 | G20 闭合（`h_min` 与 `min_clearance` 差异 = 判据时序） | `scripts/cbf_hmin_diag.py` + `/tmp/navvel_g20/` | — |
+| 2026-09-12 21:36–22:04 | A1a（去 12 自由球）3×20M + 6 验收 | 见 §0.5.11 | 外层 `8d521b5` |
+| 2026-09-12 21:55–22:04 | A1b（底面 0.6）3×20M + 6 验收 | 见 §0.5.12 | 外层 `8d521b5` |
+| 2026-09-12 22:2x–22:4x | A2 首轮排查（**误判**：判据错，代价 ~2 h） | `/tmp/navvel_a2dbg/*.log` | 外层 `9804d62`、`67b852a`（已更正） |
+| 2026-09-12 22:35–22:42 | **定位真因**：PhysX GPU patch/contact 池容量；二分 12 组 | §0.5.13 表；`/tmp/navvel_a2dbg/{bisect,discriminate}.sh` | 子模块 `eeacfc9` |
+| 2026-09-12 22:42–22:45 | **数值中性实测**（同命令 patch 前后 ckpt 逐位相同） | `/tmp/navvel_a2dbg/NUM_pre.sha` | 子模块 `eeacfc9` |
+| 2026-09-12 22:48–23:03 | **A2 重跑成功**（3/3 seed 跑完 20M） | `run-20260912_224820-hagpq5y8` / `…_224821-gt5rzce5` / `…_225726-9edt4cgf` | — |
+| 2026-09-12 23:03–23:06 | A2 验收 6/6 `exit=0` → 门禁计算 | `/tmp/navvel_p1/eval_a2/`；§0.5.14 | 外层 `617d9cb` |
+| 2026-09-14 | 进度快照 §0.6 + 坑 8/9 | 本节 | 外层 `f00dc6b` |
+| 2026-09-14 10:15 | 复核更新（时间点/机器状态/卡点 4/本账本）+ 恢复旧缓冲覆盖 | 本节 | 外层（本次） |
+
+#### 0.6.5 下一步（按依赖顺序）
 
 1. **（待定）路线 B 或 A** —— 见 §0.6.3。
 2. **A3 前的三项准备**（与路线无关，可先做）：
@@ -723,6 +747,7 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 3. **A3 批次**（3 seed × 20M）+ 6 次验收 + 与 A2 单变量对照。
 4. **A4**（≥3 seed，建议 5）+ §4.2 全部门槛 ⇒ 阶段 1 交付冻结。
 5. **P3（阶段 2 第一轮）**：臂 × `p_filter` 矩阵（需新增 `p_filter` hook）。注意阶段 2 的两个门禁现在离得很远（0.5974 vs 0.95）—— **这是整个计划里最难的 1 项**。
+6. **修掉门禁口径（卡点 4）**：把 `aggregate_acceptance_eval.py` 的 `dropped_relevant_gate` 明确区分 `dropped_relevant_frac`（逐障碍）与 `dropped_relevant_step_frac`（逐步），并在输出里同时给两个值 + 同时给"逐步 > 1%"的触发标记。**与路线选择无关，可随时做（~5 min）**。
 
 
 
@@ -1301,9 +1326,10 @@ print('r_cbf=', cbf_safety_radius(r_o,0.10,0.02,0.05,1.8,2.0,use_brake_term=Fals
 
 ---
 
-**下一步**（2026-09-14 更新，详版见 §0.6）：K1 ✅ / K5 ✅ / P0.1 ✅（逐位复现）/ P0.2 ✅（`v1.1.0`）/ A1a ✅ / A1b ✅ / **A2 ✅（0.8340，差 1.6 pt）**；
+**下一步**（**2026-09-14 10:15 更新**，详版见 §0.6）：K1 ✅ / K5 ✅ / P0.1 ✅（逐位复现）/ P0.2 ✅（`v1.1.0`）/ A1a ✅ / A1b ✅ / **A2 ✅（0.8340，差 1.6 pt）**；
 **待你决策**：① 路线 B（限制同柱层数、保持 K=8，~15 min）还是 路线 A（K 8→12 红线，须重跑整条 1a 阶梯）；
-② 是否现在就实现 **A3 的连通性门禁 + 最小激活槽数约束**（与路线无关，可先做）；③ 阶段 1 收口（A3→A4）与阶段 2 第一轮（P3 臂矩阵）的优先级 —— 阶段 2 门禁目前离得很远（零介入率 0.5974 ≪ 0.95）。
+② 是否现在就实现 **A3 的连通性门禁 + 最小激活槽数约束**（与路线无关，可先做）；③ 阶段 1 收口（A3→A4）与阶段 2 第一轮（P3 臂矩阵）的优先级 —— 阶段 2 门禁目前离得很远（零介入率 0.5974 ≪ 0.95）；
+④ 是否现在顺手修掉 §0.6.2 卡点 4 的**门禁口径不一致**（`dropped_relevant_frac` vs `_step_frac`，~5 min，与路线无关）。
 
 **P0.2 的实际执行（与原计划的差异，均已记录）**：
 ① profile 未用"手工改 4 键"，而是给 `make_geometry_profile.py` 加了**派生模式**（`--from-profile …
