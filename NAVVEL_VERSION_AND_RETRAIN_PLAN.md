@@ -705,6 +705,78 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 
 **③ 预期（待验收后填）**：M = 8 = K ⇒ 观测窗口能装下全部槽位 ⇒ 预期 `dropped_relevant_step_frac ≈ 0`（**按构造**）、`arrival@0.2` 介于 A1b `0.8053` 与 A2 `0.8340` 之间或更高（世界更简单）。这是"**降低密度本身够不够**"的直接答案，与路线 C（每柱一槽）是两条**互补**验证 —— 路线 B 降低密度，路线 C 修正表征。
 
+**④ 判定变更（2026-09-14，用户决策）**：`A2L2` **不予重新验收**。原因不是它跑得差，而是它**几何上非法**：见 §0.5.16③ —— L=2 时相邻层间距最坏 **1.585 × 2r**，柱中间会露出最大 **1.34 m** 的缝，"柱"退化成"两片悬浮圆盘"，与 §3.2 的柱语义（可被 CBF 逐层串成一根柱）不符。因此路线 B 的合法形态**只有 L=3**（= `A2L3`，M=12，最坏间距 **0.792 × 2r**，**连续**）。**L=2 的 3 个 ckpt 不再用作任何对照基线。**
+
+---
+
+### 0.5.16 环境故障（Xid 31）与"地平线 = 高度计"的量化（**2026-09-14**）
+
+这一节记录两件**与算法无关但决定了所有数字可比性**的事：验收为何会挂，以及为什么必须先冻结验收协议。
+
+**① 验收挂死的根因 —— 图形引擎 Xid 31，不是显存、不是代码**
+
+| 观测 | 值 |
+|---|---|
+| 内核报错 | `Xid 31 MMU Fault: ENGINE GRAPHICS ... FAULT_PDE ACCESS_TYPE_VIRT_WRITE`（**每个 eval 进程恰好 1 次**） |
+| 训练状态 | **正常**（CUDA 计算路径健康；7.2 GiB/进程，`ok=True`） |
+| 现场特征 | 进程 `Rl`、CPU 1500–2800%、**GPU util 0%**、日志停在启动后 ~11 s |
+| `--gpu-reset` | **被 `nxnode.bin`（NoMachine 图形会话）占用 `/dev/nvidia*` 阻断** ⇒ **不能重置** |
+
+⇒ 结论：**图形引擎先崩，图形引擎的初始化（渲染管线/Vulkan PSO）就地空转**，而 CUDA 计算完全不受影响。这解释了"**训练一直好、只有验收坏**"这一反直觉现象。
+八次无效尝试（`--parallel` 1/2、清 `/dev/shm`、按 PID 杀残留、`NAVVEL_KIT_EXTRA_ARGS`、跳过 renderer 初始化等）已记入 §0.5.7 坑 9b。
+
+**② 绕过办法（用户提出，实测有效）—— 降低单次 eval 的环境数**
+
+| `--num-envs` | 结果 |
+|---|---|
+| 64 | **假成功** —— 在 ~9.4 s 退出，**早于**故障时点 ~9.787 s ⇒ 不可作为证据 |
+| 128 / 256 / 384 / 448 | **通过** |
+| 512 | **挂死** |
+
+⇒ 场景规模相关，**阈值在 448 与 512 之间**。协议因此定为 **384**（可靠尺寸中最大）。
+⚠️ **严禁把 eval 与训练并发**：一次并发导致 eval `torch.OutOfMemoryError`，**并连带杀掉正在训练的 A2L3 seed 11/12**（`ckpt=NONE`）。**所有 GPU 工作一律串行**（§0.5.7 坑 9c）。
+⚠️ **不同 `--num-envs` 抽取的障碍布局不同** ⇒ 跨尺寸的数字**不可比**（§0.5.7 坑 9d）。
+
+**③ 地平线研究：`arrival@0.2` 在长地平线下是"时间窗"，不是"能力"**
+**同一个 checkpoint**（`A2L3` seed 13，384 envs，滤波器 ON，其余条件完全相同）只改 `rollout_steps`：
+
+| `rollout_steps` | `arrival@0.2` | `corr_mean` | `corr_p95` | 碰撞 | `dropped_relevant_step_frac` |
+|---|---|---|---|---|---|
+| 600 | **0.7943** | 0.1859 | 0.8681 | 0 | **0.0** |
+| 900 | **0.9635** | 0.1287 | 0.7821 | 0 | **0.0** |
+| 1500 | **0.9974** | 0.0780 | 0.6396 | 0 | **0.0** |
+
+- 600 步 = 600 × 32 帧，而 `max_episode_length = 1500` ⇒ **600 步只覆盖 40% 的 episode**，所以它测的是"**12 s 内到达率**"，不是"能不能到达"。
+- ⇒ **门槛含义必须写死**：在 1500 步协议下 `arrival@0.2 ≥ 0.85` 读作"**每 episode 成功率 ≥ 0.85**"；在 600 步协议下同一数字读作"**12 s 内到达率**"。**两者不可混用**，历史数字（A1b 0.8053 / A2 0.8340 / A2L2 0.8359）全部是 **600 步口径**。
+- `corr_mean` / `corr_p95` **随地平线漂移**（0.186→0.078 / 0.868→0.640）⇒ **同样不可跨地平线比较**。
+- **`dropped_relevant_step_frac = 0.0`（600/900/1500 三个地平线全部为 0）** ⇒ 在 M=12 的连续柱世界（A2L3）里，**K=8 已经够用**，观测窗口没有丢相关障碍。**这直接说明：真正需要路线 C（每柱一槽）的是 A3 的 M=48，而不是当前 A2 量级。**
+
+**④ 地平线无关的速度指标（已实现，`d6f8f6f`）**
+`arrival@0.2` 一旦地平线足够长就饱和（0.9974），**无法再区分阶梯**。因此新增**与 rollout 长度无关**的指标：env 自身按 **episode 相对步**记录的 `stats["first_arrival_step"]`（首次到达的 `progress_buf` 步数，0 = 从未到达）。报告 `arrival_steps_{median,mean,p90,n}`（`eval_ckpt.py` + `aggregate_acceptance_eval.py`，包在 `try/except` 里，**永不阻断验收**）。这是**长地平线协议下的阶梯判别量**。
+
+**⑤ 路线 C 的 CPU 级决定性证据（**变体 (a)**）**
+同一场景（一根柱的 6 层都在无人机附近 + 3 根远柱）：
+
+```
+obs_per_pillar=False -> valid slots 8, pillar ids [0,0,0,0,0,0,3,3]   （一根柱独占 6/8 槽）
+obs_per_pillar=True  -> valid slots 4, pillar ids [0,3,2,1]           （每柱 1 槽，4 根柱全可见）
+```
+
+⇒ 修好了"**一根柱吃掉整个窗口**"这个表征缺陷。**默认关闭**（`obstacle.obs_per_pillar=false`）⇒ 冻结世界（v1.0.0/v1.1.0）与 A1a/A1b/A2/A2L2/A2L3 的既有结果**不受影响**。设计见 `plan_before/navvel_obs_per_pillar_design.md`（MINOR 版本 ⇒ 实施后为 `v1.3.0`）。
+⚠️ **交付链路依赖**：`navvel_actor.ts` 的 obs 布局随路线 C **改变** ⇒ 部署侧必须同步；而 **K6（部署仓库）目前仍不存在**，是路线 C 唯一真正的交付链依赖。
+
+**⑥ 柱连续性 CPU 门禁（已实现，`fa84c66`）**
+`scripts/pillar_layout_check.py` 新增：**逐 env** 计算相邻层最坏间距 / (2r)，`> 1` 即 **FAIL**（`--allow-discontinuous` 可对冻结的 legacy profile opt-out）。实测：
+
+| profile | L | M | 最坏间距 / (2r) | 判定 |
+|---|---|---|---|---|
+| `A1b` | 4 | 16 | 0.531 | ✅ **CONTINUOUS** |
+| `A2L3` | 3 | 12 | 0.792 | ✅ **CONTINUOUS** |
+| `A2` | 2–6 | 24 | 1.443 | ❌ **HAS A GAP** |
+| `A2L2` | 2 | 8 | 1.585 | ❌ **HAS A GAP** |
+
+⇒ **`A2` 的 `arrival@0.2 = 0.8340` 是在一个"柱中间有 1.22 m 缝"的世界里取得的**，不能当作合法阶梯点。**这也是路线 B 几何上不可行的证明**：要让一根柱读作"一根柱"就必须 `L ≥ (z_hi−z_lo)/(2r)`；而 4 根柱要满足 `M = 4L ≤ K = 8` 则必须 `L ≤ 2`。**两者矛盾 ⇒ 同时要"柱连续"和"K=8"只有路线 C（每柱一槽）能给出。**
+
 ---
 
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
@@ -812,13 +884,20 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 | 2026-09-14 17:2x | **路线 C 设计文档**（每柱一槽：逐文件 diff 计划 + 代码骨架 + 测试/验收 + 风险/回退）—— **待审，未实施** | `plan_before/navvel_obs_per_pillar_design.md` | 外层 `1ca981a` |
 | **2026-09-14 17:08–17:23** | **A2L2 训练完成 3/3**（`worst exit=0`，见 §0.5.15①） | s11 `run-20260914_170755-oii6i57e` `183b69f5494d65f4…`（537 s）；s12 `…-b6bukwjn` `2bdfeef04e8aaa3d…`（530 s）；s13 `run-20260914_171652-03msm7nr` `02a534736eea435a…`（359 s） | — |
 | ⏸ **2026-09-14 17:24–17:31** | **A2L2 验收两次卡死在渲染器初始化**（坑 9b）：`--parallel 2` 与 `--parallel 1` 各一次；均 GPU 0% / CPU 上千% / 日志停住 | `/tmp/navvel_p1/eval_a2L2/`（作废）、`/tmp/navvel_p1/eval_a2L2b/`（作废） | — |
+| 2026-09-14 17:4x | **门禁改名 + triggers 块**：`dropped_relevant_gate` → `dropped_relevant_frac_gate`（原名与计划 §3.2 的**逐步**口径撞名，差 ~60×） | `scripts/aggregate_acceptance_eval.py`；重跑打印 `[TRIGGERED] K escalation rule: dropped_relevant_step_frac(ON) = 0.1886` | 子模块（见 §0.6.4 上文 `3eae3e2` 系列） |
+| 2026-09-14 18:0x | **柱连续性 CPU 门禁**（`spacing / 2r ≤ 1`）；实测 A1b 0.531 PASS / A2L3 0.792 PASS / A2 1.443 FAIL / A2L2 1.585 FAIL | `scripts/pillar_layout_check.py`；`/tmp/navvel_a2dbg/` | 子模块 `fa84c66` |
+| 2026-09-14 18:1x | **路线 C 变体 (a) 实施 + 决定性 CPU 实验通过** | `/tmp/navvel_a2dbg/test_obs_per_pillar.py`；一根柱 6/8 槽 → 每柱 1 槽、4 柱全可见 | 子模块 `ae842c5` |
+| 2026-09-14 18:2x | **`A2L3` profile**（L=3，M=12，连续） | `cfg/profiles/A2L3.yaml`；CPU 门禁 PASS | 子模块 `528cf23` |
+| 2026-09-14 18:2x | **速度指标（地平线无关）** `arrival_steps_{median,mean,p90}` | `scripts/eval_ckpt.py` + `aggregate_acceptance_eval.py` | 子模块 `d6f8f6f` |
+| **2026-09-14 18:2x** | **A2L3 seed 13 ✅**；seed 11/12 被我的并发误操作 OOM 杀掉后**重新起跑** | `/tmp/navvel_p1/a2L3/`（s13 `10461c24…`，353 s）、`/tmp/navvel_p1/a2L3b/`（重训） | — |
 
 #### 0.6.5 下一步（按依赖顺序，**2026-09-14 17:1x 更新**）
 
 1. **✅ 已决策：走路线 B→A** —— 见 §0.6.3。
-2. **🔄 进行中（17:08 起）：路线 B 的 `A2L2` 批次**（3 seed × 20M）+ 6 次验收。判据：**`arrival@0.2 ≥ 0.85` 且 `dropped_relevant_step_frac ≈ 0`**。结果写 §0.5.15。
-   - 若**过** ⇒ 阶段 1 在不触发红线的条件下收口，K 扩容留给 P4；
-   - 若**不过** ⇒ 走路线 A（K 8→12 + 一次性重跑 1a 阶梯 ≈ 1–1.5 h）。
+2. **🔄 进行中（2026-09-14 18:24 起）：路线 B 的合法形态 `A2L3`**（`A2` 单键 `pillar_layers_range [2,6]→[3,3]`，L=3，M=12，间距 **0.792×2r 连续**）+ 6 次验收。
+   - **`A2L2`（L=2）已作废**：几何非法（间距 1.585×2r，柱中间最大 1.34 m 缝），**用户已决定不重新验收**（见 §0.5.15④ / §0.5.16⑥）。
+   - seed 13 ✅（`10461c24…`，353 s）；**seed 11/12 正在重训**（我先前的并发误操作把它们 OOM 杀了 —— 教训见 §0.5.7 坑 9c）。
+   - 判据：`arrival@0.2` + **与地平线无关的 `arrival_steps_median/p90`** 双看；`dropped_relevant_step_frac ≈ 0` 已在该配置实测为 0。
 3. **A3 前的三项准备**（与路线无关，可先做）：
    - 采样侧的**瓶颈连通性门禁**：现在 `min_corridor` 是 **fail-fast**（未实现，见 §3.2/G8/G10）。`scripts/pillar_layout_check.py --connectivity --corridor-clearance W` 已有 CPU 侧实现，缺的是**采样器内部**的拒绝/重采样；
    - **最小激活槽数 ≥ K** 约束（否则 `inf` 填满窗口，等于白送 K 个空位）；
@@ -829,7 +908,11 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 7. **A4**（≥3 seed，建议 5）+ §4.2 全部门槛 ⇒ 阶段 1 交付冻结。
 8. **P3（阶段 2 第一轮）**：臂 × `p_filter` 矩阵（需新增 `p_filter` hook）。注意阶段 2 的两个门禁现在离得很远（0.5974 vs 0.95）—— **这是整个计划里最难的 1 项**。
 9. **✅ 已做（2026-09-14 17:1x）**：门禁口径修复（原第 6 项，卡点 4 已关闭）。
-10. **⏸ 待你审**：路线 C 的 `plan_before/navvel_obs_per_pillar_design.md`（每柱一槽）—— 审过再决定是否实施。
+10. **✅ 路线 C 已批准并实施（2026-09-14）**：`obstacle.obs_per_pillar`（**默认 false**）+ 逐柱观测窗口 + 验收侧逐柱 `dropped_relevant`；CPU 决定性实验通过（见 §0.5.16⑤）。**待做的端点验证 = `A2P` 决定性实验**（`A2` + `obs_per_pillar=true`，M=24）：预期 `dropped_relevant_step_frac` 18.86% → ~0 且 `arrival@0.2` 上升。
+11. **【需你确认】验收协议冻结**：建议 **`384 envs × 1500 steps`**（= 1 个完整 episode）。附带两件事：
+    - 门槛含义重写为"**每 episode 成功率 ≥ 0.85**"（不再是"12 s 内到达率"）；
+    - **速度指标 `arrival_steps_median/p90` 提升为正式门槛**（长地平线下唯一不饱和的判别量）。
+12. **【待办】A1b / A2 在冻结协议下重新验收**（**无需重训**，ckpt 未变）⇒ 恢复同口径可比性；`A2` 需同时标注"几何非法、仅供参考"。
 
 
 
