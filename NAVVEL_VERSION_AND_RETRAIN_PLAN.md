@@ -913,6 +913,33 @@ A3 的硬前提（§0.6.5 第 3 项）。`obstacle.min_corridor` 此前是 **fai
 
 **④ 提交**：子模块 `bf63e51`。
 
+**⑤ M=48 smoke test（✅ 通过，2026-09-14 20:22–20:24，§3.2/G11 硬要求）**
+
+`train.py task=profiles/A3 … task.env.num_envs=1024 total_frames=131072`（4 个 iteration，1024 envs × 32 帧 = 32768 帧/iteration）：
+
+| 检查项 | 结果 |
+|---|---|
+| 进程退出 | `exit=0`（**连 teardown 都没崩**） |
+| **`Unexpectedly unregistered an interaction`（M=24 时期的杀手）** | **0 次** ✅ |
+| PhysX GPU 错误 | **0 次** ✅ |
+| 训练是否真的推进 | ✅ 3 个 ckpt、grad norm 正常、final eval、`checkpoint_final.pt` 落盘 |
+| 连通性门禁是否生效 | ✅ 构造时打印 `min_corridor: 1.34`；**无一条 `[ObstacleManager] WARN`** ⇒ 15 轮重抽内全部 env 满足 |
+| NaN | **0 次** |
+
+⇒ **容量修复（`gpu_max_rigid_patch_count = 2097152`）在 M=48 下成立**，A3 可以开训。
+
+**⑥ 连通性门禁的吞吐开销（实测）**
+
+| n_envs | 一次 `_corridor_connected` | 单次 `sample_layout`（含重抽） | 每 env |
+|---|---|---|---|
+| 64 | 11.2 ms | 28.4 ms | 175 µs |
+| 256 | 71.9 ms | 147.8 ms | 281 µs |
+| 1024 | **287 ms** | **491 ms** | **280 µs** |
+
+> ✅ **摊薄后可忽略**：`nav_vel._reset_idx(env_ids)` 只对**需要 reset 的子集**调用 `sample_layout`，而 `max_episode_length = 1500` ⇒ 每步平均只有 `1024/1500 ≈ 0.68` 个 env reset ⇒ **门禁摊到 ~0.19 ms/步**（训练一步约 30–50 ms）。
+> ⚠️ **唯一需留意的时刻**：**首次 reset（1024 envs 同时）**要一次性付 **491 ms**；若将来把 `max_episode_length` 调到很小，这个成本会线性放大。
+> 若将来确实需要降本：把 `obstacle.corridor_cell` 从 0.05 调粗（0.10 ⇒ 栅格少 4 倍），但要同步把 `pillar_layout_check.py --cell` 调成一样，否则两个工具会重新不一致（这正是当初要求"同一判据"的原因）。
+
 ---
 
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
