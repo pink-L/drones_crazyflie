@@ -720,6 +720,9 @@ PhysX error: Unexpectedly unregistered an interaction that does not have a valid
 - 删除范围：`OmniDrones/scripts/wandb/run-20260914_{170755-oii6i57e,170755-b6bukwjn,171652-03msm7nr}/`（各 11 MB）+ `/tmp/navvel_p1/a2L2/`（1.2 MB 批次日志）+ 两个作废验收目录 `/tmp/navvel_p1/eval_a2L2/`、`/tmp/navvel_p1/eval_a2L2b/` + wandb 云端 project `env_design_geo11_p1geom` / group `NavVel-P1-A2L2` 的三个 run。
 - **该 profile `cfg/profiles/A2L2.yaml` 保留**（它是"L=2 恰好有缝"的 CPU 门禁反例，`pillar_layout_check.py` 的 FAIL 用例依赖它）。
 - 本节 sha256 是删除后**唯一**的凭据 ⇒ 若将来要复活，只能重训（3 seed × 20M ≈ 9 min，与 A2L3 同流程）。
+- **执行确认（2026-09-14 18:28–18:29）**：本地产物已 `rm -rf` 且复核"不存在"；wandb 云端 3 个 run 已 `api.run(...).delete()`，复核 project `env_design_geo11_p1geom` 由 **26 → 23 runs、A2L2 残留 = 0**。
+- **删除前做的安全确认**：逐目录读 `files/config.yaml` 的 `wandb.run_name`，确认 `…-a2L2-11/12/13-final`（**不是** A2L3）；并确认 A2L3 重训用的是 `/tmp/navvel_p1/a2L3b`，与本删除无交集。
+- **顺手记录（不在本次删除范围，待你决定是否清理）**：同 project 的 `NavVel-P1-A2` group 里有 **6 个 `failed`/`crashed` 的排查残留 run**（`8mfhw9xx` `ees2gyot` `3rs98gko` `2febl7a2` `026rl3j9` `gutwokob` `gklqkiv2` `0r6x95k1`）和 `NavVel-P1-A2L3` 首批的 2 个 OOM `failed` run（`3yq8fhik` `v0l4bqnv`）。它们**不含有效 ckpt**，但保留了"PhysX 容量 bug 现场"的曲线，**建议保留**（A2 的 6 个 `failed` 是 §0.5.13 根因定位的直接证据）。
 
 ---
 
