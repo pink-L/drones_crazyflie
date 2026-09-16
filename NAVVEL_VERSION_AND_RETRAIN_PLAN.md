@@ -1065,6 +1065,43 @@ setsid nohup python scripts/train_batch.py \
 
 ---
 
+### 0.5.21 P1-A4 执行记录（**2026-09-16 08:11 起**）—— 阶段 1a 的**交付冻结**档
+
+**① A4 的配置 = A3（零键差异）**
+
+§3.2 把 A4 定义为"**同 A3 + 格筛，交付配置冻结**"。而 **A3 已经带了 `min_corridor=1.34`（连通性格筛）与 `obs_per_pillar=true`（路线 C）**，所以"**A3 + 格筛**"就是 A3 本身。
+⇒ `cfg/profiles/A4.yaml` **不改变任何键**（已用 `yaml.safe_load` **逐键比对 = `True`** 验证），它存在的唯一目的是让**交付指向一个具名的冻结 profile**，从而在 A3 将来被改动（如 A2P 那种诊断变体）时**不受影响**。
+
+⚠️ **对 §3.2 表格的一处有意偏离（已写进 profile 头）**：层数范围保持 **`[3,6]`**，不是 §3.2 写的"逐柱 2–6"。原因：**L=2 必然在柱中留出竖缝**（间距 = `(z_span−2r)/(L−1) > 2r`），那样的"柱"不是一根柱 —— 已在 §0.5.16⑥ / §0.5.19 证明。`M=48` 的槽位预留不变（`nP_max × L_max` 仍是 `8×6`）。
+
+**② A4 的 CPU 门禁（✅ PASS）**：`failing layouts 0/4`、**`connectivity failures 0/4`**、连续性 `0.771`（CONTINUOUS）、柱数分布 `2/4.12/8`。
+
+**③ 启动命令**（5 seed，`--parallel 2`）
+```
+cd /home/lz/lzspace/drones/OmniDrones
+setsid nohup python scripts/train_batch.py \
+  --profile profiles/A4 --group NavVel-P1-A4 --project env_design_geo11_p1geom \
+  --tag cfb-dual-chiA-a4 --seeds 11 12 13 14 15 --parallel 2 --logdir /tmp/navvel_p1/a4 \
+  > /tmp/navvel_p1/a4/batch.log 2>&1 < /dev/null & disown -a
+```
+- **Warm start**：`checkpoint_19693568.pt`（`7e03babd…`）—— **与 A1a/A1b/A2/A2L3/A3 完全相同**（已核实文件仍在位）；
+- **seed 11–15**（前 3 个与 A3 同 seed，便于逐 seed 对照；14/15 为新增）。
+
+**④ 启动后 80 s 健康检查（✅）**
+
+| 检查项 | 结果 |
+|---|---|
+| A4 专属初始化行 | ✅ `randomized pillars ON: … M=48 min_corridor=1.34` + `obs_per_pillar ON: M=48 slots -> 8 groups (K=8)` |
+| Python 异常 / PhysX 错误 | **0 / 0** |
+| ckpt 落盘 | ✅ `checkpoint_32768`（08:11:14 起） |
+| 显存 | **7820 + 7143 = 14963 MiB / 32607 MiB**，GPU 87% |
+
+**⑤ 预计耗时**：M=48 下每 seed ~11 min，5 seed / 2 路并发 = **3 波 ≈ 33 min**（不是 15 min；A3 实测 654/662/437 s）。
+
+**⑥ 结果（待填）**：5 个 `checkpoint_final.pt` 的 sha256 与耗时；随后按 §0.6.6 冻结协议做 `512×600` + `384×1500` 双口径验收（20 次 eval），并与 A3 逐 seed 对照。
+
+---
+
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
 
 > **时间点标注**：本节初版写成于 **2026-09-14**（提交 `f00dc6b`），**2026-09-14 10:15** 第 1 次复核，**2026-09-14 17:00** 第 2 次复核（= 本节当前版本）。上一次实际跑训练/评估是 **2026-09-12 23:06**（A2 验收 6/6 完成，见 §0.5.14）；**2026-09-13 至 2026-09-14 17:00 之间未跑任何训练**（GPU 全程空闲）。
