@@ -1460,6 +1460,45 @@ A0 在 `512×600` 下 `arrival@0.2 = 0.3841`，在 `384×1500` 下是 **0.8949**
 
 ---
 
+### 0.5.25 P3 前置验证与裁决（2026-09-16）—— 尚未开训，先立证据
+
+> 状态：三项前置验证完成（纯 CPU/只读，未动代码、未花 GPU）；用户裁决 2 项（符号、F3）；P3a 未开跑。**结果将陆续续写在本节。**
+
+**① 零介入率：策略属性（机制前提更正）**
+
+- **更正**：`intervened ⟺ h<0` 不成立。A1a/A1b/A2/A4 的 `h_below0_frac` 恒 0.0、`h_min 0.0000–0.0007`，而介入 14–22% ⇒ 它量的是 `n·v+αh<0`（朝障接近速度 > 剩余裕度）。来源：`/tmp/navvel_p1/agg/a4_384x1500.json`、`/tmp/navvel_p1/ladder384_1500/*/agg.json`、A4 5 个 `wandb-summary.json`。
+- **算术**（口径 A：`r_cbf=0.5943`、`min_corridor=1.34`）：走廊中线 h=0.500；中线直穿零违例最大速度 ≈**1.29 m/s**；1.3/1.5/1.8 m/s 单次穿行违例时长 **31/123/165 步** ⇒ A4 实测 ~238 步 ≈ 1–2 次穿行、且 600/1500 两协议绝对步数近乎不变（210–250）。
+- **判定**：**策略属性**（可被训练改变），但门槛难度由配置 (α, margin, v_max) 定义；0.95 门 ⇔ T=1500 下 ≤75 步。几何上不强制（0 介入的可行策略存在）。
+- 残留不确定：干预的位置/时长分布，待 `--dump-diag`（T0-b）。
+
+**② 奖励量级 + 障碍 log 项符号修复（用户裁决）**
+
+| 项 | 每步均值（A4，5 seed） | 来源 |
+|---|---|---|
+| 任务项 | **+2.11** | `return 2417.9 / episode_len 1146.1` |
+| CBF viol `w1·viol` | **−0.088**（激活时 ≈−0.51） | `train/stats.cbf_violation` EMA 0.775–0.974 × w1=0.1 |
+| CBF corr `w2·(1−e)` | **−0.011~−0.016**（推算，非直接计量） | corr_mean 0.092 / p50=0 / p95 0.65–0.91 |
+| `h_penalty` | **0**（A4 关闭） | A4 profile |
+
+- 论文对照（Table II：`r_progress=20`、`r_cbf=100×[…]`）：激活时相对权重 5–15× vs 本项目 ≈0.28× ⇒ **差 ~20–50×**（按"同柱多层求和 vs 取 min"归一则 ~100–200×）。§6.1 方向成立。
+- **符号发现**：`nav_vel.py` L940–949 障碍 log 项 `reward -= wλΣφ`（φ=ln(d/D)<0）在危险区是**正奖励**（d=0.3 → +0.31/步；**d=0.05 → +1.12/步/障碍**）；kaiwu 原型 `_log_safety_reward`（reward_process.py L1115）与三份设计文档的数值示例均为**负**。行为指纹：**全档 `min_clearance_global_min` 钉在 0.0494–0.0568**（碰撞阈值 0.05 之上 0–7 mm；ON 与 OFF、5 seed × 384 env 的全局最小皆如此）。
+- **裁决（用户 2026-09-16）**：**log 项应为惩罚（补负号）** ⇒ P3 起 `obstacle.reward_obs_log_mode: penalty`（`reward += wλΣφ`）；代码默认 `legacy` ⇒ A0–A4 冻结 profile 逐位不变。**A0–A4 数字属 legacy 口径，不得与 penalty 口径结果直接混比。**
+- **F3 裁决（用户）**：本轮**不开**（buffer 0.1–0.2 几乎不 fire：走廊中线 h≈0.5；修符号后 log 项覆盖同职能）。
+
+**③ `p_filter` 落点（4 类文件）+ PPO 口径核验**
+
+- 机制：`utils/cbf.py::CBFVelocityFilter`（执行决策 + `info` 输出；**`filter_velocity` 不动**）+ `cfg/task/NavVel.yaml`/profiles；`nav_vel.py` 仅统计/info（奖励 core 早已独立重算 corr，与执行解耦）；**`ppo.py` 的 `clip_param` 硬编码**（仅当需要才可配）。
+- 链路核验：`info.policy_action`（滤波前、已限幅 v_nom）→ `self.policy_actions` → 奖励 core 完好；实现 p 时**不得改写**该键。
+- **PPO 口径（源码+CPU 微实验）**：采集器存储的动作 = 策略原始 `a`（torchrl `inv` 的 `clone(recurse=False)` 不回写原 td），执行动作 = `a_cbf`（p=1 现状）；p<1 把不一致步占比从 ~16% 降下来，p=0 完全一致。**不需要放宽 clip**；监控 entropy/std。
+
+**④ 未决与局限（诚实记录）**
+1. 符号效应尚无受控实验；**P3-pre [待批]**：`dual-p1 @ legacy 符号` × 3 seed（≈30 min）可单变量隔离。
+2. viol/corr 条件均值由 EMA 与分位数反推（本地无 history；**per-term stats 从未实现**——T0-a 补）。
+3. "PPO 存 a"经源码 + 微实验，端到端断言列入 T0-c 冒烟。
+4. F1 报告的总公式行符号记法自身与代码多处不一致：比对以数值示例/命名/kaiwu 为准，勿再被公式文本误导。
+
+---
+
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
 
 > **[2026-09-16 补]** 本节主体仍是 09-14 的快照。此后到 09-16 的进展见 **§0.5.20–0.5.24**，其中 §0.5.22–0.5.24 是**验收口径修复**（用户指令"开始完成第一步"）：
@@ -2031,7 +2070,21 @@ flowchart TD
 
 ### 3.4 P3 —— 阶段 2 第一轮：臂 × `p_filter` 矩阵（新增代码 G2）
 
-**因子**
+> **[2026-09-16 修订 —— 前置验证后定稿；本节以本修订为准，与下方初版冲突处一律以本修订覆盖]**
+> 依据：§0.5.25（三项前置验证 + 用户裁决）。与初版的 4 处差异：
+>
+> 1. **奖励修复（用户裁决）**：障碍 log 距离项改为**惩罚**。现实现 `reward -= w·λ·Σφ`（φ=ln(d/D)<0）在危险区内是**正奖励**（d=0.05 时 +1.12/步/障碍），与 kaiwu 原型及三份设计文档的数值示例相反 ⇒ 改为 `reward += w·λ·Σφ`。
+>    实现：新增 `obstacle.reward_obs_log_mode: legacy | penalty`（**代码默认 `legacy` ⇒ A0–A4 冻结 profile 逐位不变**；`cfg/task/NavVel.yaml` 与全部新 P3 profile 显式 `penalty`）。
+>    ⚠️ **口径声明：A0–A4 的全部数字属 `legacy` 口径，不得与 `penalty` 口径结果直接混比。**
+> 2. **F3（`h_penalty`）本轮不开**：量化表明 `buffer 0.1–0.2` 几乎不 fire（走廊中线 h≈0.50，只有贴到 0.27 m 内才罚）；修符号后 log 项已覆盖"接近前就罚"的同一职能。保留 `h_penalty` 代码与测试不动，留待 P3b 视情再验。
+> 3. **零介入率的机制前提更正**：`intervened` **不是**"进入 CBF 球"（A1a–A4 的 `h_below0_frac` 恒为 0.0），而是 `n·v+αh < 0`（朝障接近速度 > 剩余裕度）。0.95 门 ⇔ T=1500 下 ≤75 步（等价式已在聚合器中）。
+> 4. **T0 前置（先于 P3a，GPU ≤5 min）**：(a) 训练侧补 `stats/term_*` 分项仪器（这是 log 符号问题此前不可见的根因）；(b) `eval_ckpt.py` 增 `--dump-diag` 落盘（收尾 V1 的干预分布、为 F3 定标）；(c) p∈{1, anneal, 0} 冒烟 + "stored action = 策略 a / executed = a_cbf" 断言（PPO 口径见 §0.5.25 V3）。
+>
+> **矩阵与 seed（修订）**：8 配置 × 3 seed；`p0` 组补到 5 seed ⇒ **28 runs**。
+> **P3-pre 对照（[待批，+3 runs ≈30 min]）**：`dual-p1 @ legacy 符号` × 3 seed，与 28 runs 同 warm start / 同 seed，用于**单变量**隔离"符号修复"的效应（对齐 §0.5.25 的 H_sign 判据）。
+> **判据/失败判据/估时/纪律**：见本节末"修订附则"。
+
+**因子（初版，见上方修订）**
 
 - **F1 臂**（实际键名，见 §1.3-②）
   | 臂 | `cbf.mode` | `penalty_src` | `correction_weight` | 说明 |
@@ -2074,6 +2127,33 @@ flowchart TD
 > ⚠ **PPO 口径警告（沿用指南 §B.1）**：`p>0` 时实际执行的不是策略采样的动作，而 PPO 似然仍对 `a` 计算 ⇒
 > "梯度-结果不一致"。必须监控 `ratio / KL / entropy` 与 `std(a)` 是否塌缩；
 > `pann` 需与 `clip_range` 同步放宽；`p1` 与 `p0` 必须**同 seed 同预算**才可比。
+
+#### §3.4 修订附则（2026-09-16）
+
+**判据与门槛（判过/不过）**：§4.3 阶段 2 全 8 条（含 `零介入率 ≥0.95` ⇔ `≤0.05·T` 等价式、`h_min^train ≥0`、0 碰/0 OOB 双侧、`arrival@0.2(OFF) ≥0.85`、依赖度 ≥0.95、stall ≤10%）；§4.2 阶段 1 同批记录。**新增只记录**：`intervened_steps`、`∫corr dt`、`h_min`、`term_*`（不得进 PASS/FAIL 行；若进验收表必须同步 `METRIC_ORDER`，卡点 14）。
+
+**失败判据（提前写死，先于数据）**：
+- **H_p（软蒸馏有效）**：若 `dual-p0` 的零介入率 − `dual-p1` 的差值 ≤ seed 离散度（或为负）⇒ 否；
+- **H_cal（权重太小）**：若 P3b 把 `w1/w2` 提 10× 仍无同向改善 ⇒ 否；
+- **H_sign（贴边由 log 符号驱动）**：若修符号后 `min_clearance_global_min` 仍钉在 0.05 / 零介入率不动 ⇒ 否（改查其它机制）。
+
+**PPO 口径增补（2026-09-16 源码级核验，覆盖上方旧警告）**：采集器存储的 `("agents","action")` 是**策略原始 a**（torchrl `inv` 用 `clone(recurse=False)`，实测嵌套写入不回写原对象），而执行的是 `a_cbf` ⇒ 似然对 a、动力学对 a_cbf（**p=1 的现状即如此**；p<1 只降低不一致步占比，p=0 完全一致）。**经核验不需要放宽 clip**（`clip_param` 硬编码在 `ppo.py`，仅在需要时改为可配）；监控 `entropy`/`std(a)`（std 已有 `[0.05, 1.8]` clamp）。
+
+**GPU 估算（实测 651±17 s/run，`--parallel 2`）**：28 runs ≈ **2.8 h**；双协议验收 112 次 ≈ 35–40 min ⇒ **P3a ≈ 3.5 h**；若含 P3-pre 对照 +~35 min。预算（≤8 h）充裕。
+
+**单变量归因纪律**：批次内只动 `p` 一维；符号修复单独对照（P3-pre）或全体一致应用，**不得在同批内混用两种符号**；`w1/w2` 标定只在 P3b、只对 P3a 胜出臂取 3–4 个点；几何/口径/DR/obs 维度本批**一律不动**（A4 冻结 profile + `penalty` 键为唯一差异）。
+
+**实现落点（修订）**：
+
+| 落点 | 改动 |
+|---|---|
+| `utils/cbf.py` | `CBFVelocityFilter` 增 `p_filter`（常量或按步 callable）+ 自持调度计数；`a_cbf/corr/intervened/executed/p_filter` 写 `info`；**`filter_velocity` 数学不动** |
+| `envs/single/nav_vel.py` | `reward_obs_log_mode` 键 + 符号分支；`stats/term_*` 分项；`info.p_filter` 统计（奖励 core 与执行解耦已就绪，corr 本就独立重算） |
+| `cfg/task/NavVel.yaml` + `cfg/profiles/P3-*.yaml` | `cbf.p_filter_schedule{...}`、`obstacle.reward_obs_log_mode: penalty` |
+| `omni_drones/learning/ppo/ppo.py` | `clip_param` 可配（**仅当需要**；经源码核验 p<1 不需要放宽 clip） |
+| `scripts/eval_ckpt.py` | `--dump-diag`（落盘 `[corr, intervened, h_min, fix_norm]` + `dmin` + `v·n`）；ON 列强制 `p=1`、OFF 用 shadow |
+
+---
 
 ### 3.5 P4 —— 阶段 1b：obs_v3 升维 + K 扩容 + 方体 SDF CBF（**一次性红线批**）
 
