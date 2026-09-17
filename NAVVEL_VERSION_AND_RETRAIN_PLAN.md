@@ -1822,6 +1822,172 @@ A0 在 `512×600` 下 `arrival@0.2 = 0.3841`，在 `384×1500` 下是 **0.8949**
 
 ---
 
+### 0.5.30 P4 前置：解析圆柱环境 + 论文口径 `Nominal` 臂（**2026-09-17 实现完成，未开训**）
+
+任务书 = `drones/prompt_new_naive_env.md`（handoff，commit `db59422`）。本节记录**第 1 步
+（改名）+ 第 2 步（解析圆柱几何 + obs_v3）**的实现与 CPU 证据；训练批次与验收**未开始**，
+等用户对 §0.5.30-⑧ 的批次提案裁决。
+
+#### ① 动机（一句话）
+P3b-1（§0.5.29）证明项目里的 `naive` 臂撤 filter 后 0.98 到达 / 0 碰**不是**因为它"裸"，
+而是因为它带着 **obstacle proximity 奖励塑形**（log 距离 / 近障减速 / 碰撞边沿）。于是
+"有没有 CBF filter / 有没有 CBF 奖励"这个命题**从来没有被干净地问过**。本轮：
+(a) 该臂正名 `obs_proximity`；(b) 造论文口径的 `nominal_paper`（**只有稀疏碰撞惩罚**）
+并 from-scratch 训练；(c) 把障碍物从"沿 z 叠球近似柱"升级为**解析圆柱（高度随机）**，
+obs 从 `[rpos, 半径]`(4 维/槽) 升级为 `[rpos, sdf, n̂]`(7 维/槽)。
+
+#### ② 用户裁决（2026-09-17，共 11 项，全部已答）
+
+| # | 议题 | 裁决 |
+|---|---|---|
+| 1 | 柱体物理 prim | **新建 Cylinder prim**（半径 R，z 向 scale 逐 episode 写 = 高度随机） |
+| 2 | obs 柱顶信息 | **严格 7 维原案**（rpos = 柱中心）；接受"旁侧时 sdf/n̂ 与柱高无关"的信息缺口（见 ④） |
+| 3 | obs 窗口 K | **K = 4 固定**（全 obs 30 + 4×7 = **58 维**）；训完按 `dropped_relevant` 门槛判 |
+| 4 | 密度课程 | **锁档分跑**（一组 profile 锁一个密度，不做在线升档）；每档 (n, R, W) 随密度下调 |
+| 5 | 与冻结口径共存 | **新增并列路径 + 新键** `obstacle.shape`（默认 `sphere_stack` ⇒ A0–A4 逐位不变） |
+| 6 | naive 改名范围 | **只改新代码/新 profile/文档术语表**；旧 `P3-naive*.yaml` 与 plan 历史章节原样保留 |
+| 7 | 柱高随机 | `z_lo~U[0.35,0.9]`、`z_hi~U[1.0,2.6]`；**每柱独立 Bernoulli(0.3)** 为矮柱（z_hi 截到 1.5）；`z_hi−z_lo ≥ 0.5` |
+| 8 | `nominal_paper` 基线 | A4 逐位复制 + `cbf.mode:none` + 关 `obs_log`/`near_slowdown`；**保留 `collision_edge=2`**（它是碰撞惩罚 = 论文 `r_obstacle`，不是 proximity 塑形）；DR/`controller_sync_dr` 不动 |
+| 9 | 档位阶梯 | R 与 W 都随档位下调（先跑 CPU 探针，再按实测微调 —— 见 ⑤） |
+| 10 | 矮柱语义 | 每柱独立 Bernoulli(0.3)（**非**逐 env 配额） |
+| 11 | 升档判据 | 不适用（锁档 ⇒ 不做在线升档） |
+
+#### ③ 我核实到、与任务书假设不符的 4 条事实（已报用户并被接受）
+
+1. **障碍接触不是终止判据**：`_design_scene` 造的是 M 个 kinematic **Sphere** prim；
+   终止只判 `crash = z<z_min | NaN` 与逻辑 `collide = d_min < collision_margin`。
+   ⇒ 判据完全在解析几何侧，**但物理球会实打实挡住"飞越"**，这才是①要改成 Cylinder 的原因。
+2. **A4 的真实密度不是 16 柱**：`_sample_pillar_random` 不接收 `n_active` ⇒
+   `curriculum.levels` 在柱路径上**空转**，A4 真实密度 = `n_pillars_range:[2,8]` 随机，
+   `M = 8×6 = 48`。⇒ 任务书的"2→4→8→16 课程"**必须**要么改代码要么走锁档（用户选锁档）。
+3. **obs 7 维在"绕行 vs 飞越"上信息不足**：无人机在柱**旁侧**（`d_r>0, d_z<0`）时
+   `sdf = d_r`（纯径向、与柱高无关）、`n̂` 水平 ⇒ "旁边一根 2.6 m 高柱"与"旁边一根 1.0 m
+   矮柱（可飞越）"给出的 `(sdf, n̂)` **完全同型**，只能靠 `rpos_z`（柱中心差）间接区分。
+   任务书 §4.2.3 的"三维 sdf 天然编码在柱顶之上还是之下"只在无人机**已在柱端外**时成立。
+   → 我提出加柱顶高差通道，**用户选择保持 7 维原案**（接受间接推断）。
+4. **16 柱 × `min_corridor=1.34` 无解**：遮挡半径 `R+W/2`，非重叠排布留 50% 自由面积的
+   面积上界要求 `nπ(R+W/2)² ≤ 18`。探针实测（见⑤）证实：n=16 在 W≥0.85 时连**柱间不重叠**
+   都做不到。⇒ 高密度档必须降 R 或降 W（用户授权两者都降）。
+
+#### ④ 实现落点（文件级）
+
+| 文件 | 改动 |
+|---|---|
+| `omni_drones/envs/single/nav_vel_obstacles.py` | 新增 `obs_slot_dim()`、模块级 `sphere_sdf_and_normal()` / `cylinder_sdf_and_normal()`（有限高圆柱 SDF，**连续、禁止二元 z 门**）；`ObstacleManager` 增 `shape`(=sphere_stack\|cylinder)、`half_h` 缓冲、`shape_sdf_normal()`、`cbf_geom()`、`sample_layout_full()`（4 元组 API，`sample_layout` 保持 3 元组不动）、`_sample_cylinder*()`、`_corridor_connected_cyl()`、`_fallback_cylinder()`、`_build_obs_cylinder()` |
+| `omni_drones/envs/single/nav_vel.py` | `shape`/`obs_slot_dim` 解析（单一来源 `obs_slot_dim()`）、obs 维度 `slot_dim*K`、`_create_cylinder_obstacles()`（建 Cylinder prim + **预建 `xformOp:scale`**）、`_write_obstacle_cylinder_scales()`（逐 episode 写 z 向 scale）、`sample_layout_full` + `commit_layout(..., half_h)`、CBF 装配改走 `cbf_geom()`、圆柱路径 + `curriculum.enabled=true` 时**打印告警**（该键在锁档下空转） |
+| `omni_drones/utils/cbf.py` | **一行未改**（`filter_velocity` 数学是红线）。圆柱靠"虚拟球输入适配"接入 —— 见下 |
+| `cfg/task/NavVel.yaml` | 新键：`shape`(默认 `sphere_stack`)、`cylinder_radius`、`cylinder_z_lo_range`、`cylinder_z_hi_range`、`cylinder_short_frac`、`cylinder_short_z_hi_max`、`cylinder_min_height`、`obs_sdf_norm`；`cbf.mode` 段加 `naive → obs_proximity` 术语注记 |
+| `scripts/make_np_profiles.py`（新） | 从 `A4.yaml` 生成 **20 个** `NP-<arm>-n<level>.yaml`（5 臂 × 4 锁档密度），每份带"只差这些键"的审计表头 |
+| `scripts/cylinder_geometry_test.py`（新） | 14 项几何/一致性单测（见⑦） |
+| `scripts/cylinder_layout_check.py`（新） | 布局不变量门禁 + `--ladder` 可行性探针 + `--profile` 端到端配置检查 |
+| `scripts/eval_ckpt.py` | **obs 布局硬护栏**：按 cfg 算期望 obs 维，与 ckpt 的 2-D 层输入宽比对，不匹配就**显式报错**（不靠 `load_state_dict` 的隐晦 shape 报错） |
+
+**CBF 的"虚拟球输入适配"**（本轮最关键的机制决定）：`filter_velocity` / `cbf_violation`
+只用到 `(n̂, h)` 这一对，而两者都只依赖位置、不依赖速度 ⇒ 对任意形状，只要构造
+`p_v = p − (h + r_v)·n̂`、`r_v > |h|`，就有 `‖p−p_v‖ − r_v ≡ h` 且方向 `≡ n̂`。于是圆柱的 CBF
+约束**在同一个代码路径里被逐位复现**，`filter_velocity` 的数学一行不改（红线）。
+球堆路径下 `cbf_geom` 返回的正是旧的 `(pos, r_safe + extra)` ⇒ A0–A4 逐位不变（t7c 实测 0 差）。
+
+**一致性不变量**（钉住的关键）：obs 的 `sdf` 通道 = `clearances()` + `(drone_radius + inflation)`
+= `h + (drone_radius + inflation + cbf_extra)`。**策略看到的世界 = 它被判的世界**（t5a/t5b/t5c）。
+窗口选择按 **`sdf`** 而非中心距（柱高随机后两者排序会分歧：远端矮柱可能挤掉近端高柱）。
+
+#### ⑤ 密度阶梯（CPU 探针实测，`cylinder_layout_check.py --ladder`，64 envs/layout）
+
+| n | R=0.4243 可行 max W | 其它 R | 选中阶梯 |
+|---|---|---|---|
+| 2 | **1.34** ✓ | — | `R=0.4243, W=1.34` |
+| 4 | **1.34** ✓ | — | `R=0.4243, W=1.34` |
+| 8 | 1.00（1.34 不达标） | R=0.30 → 1.34 ✓ | `R=0.4243, W=1.00` |
+| 16 | 0.30（W≥0.85 时**柱间不重叠**都做不到） | R=0.30 → 0.85；R=0.22/0.18 → 1.00 | `R=0.30, W=0.85` |
+
+**决策原则**：R=0.4243（0.6 m 方柱外接圆 = 部署保守量）能用的档位就不动 R，只在 n=16
+才降到 R=0.30。⚠️ 副作用须记住：**n=16 档的柱更细**（R 0.4243→0.30），跨档比较不是单变量。
+面积上界的粗估（n=8 时 W≤0.85）比实测**保守**（实测 1.00 可行）—— 记录以免后人把它当结论。
+
+#### ⑥ 护栏与"不可比"声明
+
+- obs **62 → 58**（K=4 × 7 维）。旧 ckpt（A0–A4 / P3-* / New2 63-64 维）**必须加载失败**：
+  已加 `eval_ckpt.py` 显式护栏（并且 `load_state_dict` 本身也会硬失败）。
+- **本环境的结论与 P3/P3a/P3b-1 不可比**（obs 布局 + 障碍几何同时变了）。
+- 冻结口径不受影响：`shape` 默认 `sphere_stack`，球堆路径的表达式**逐字未改**
+  （`clearances` / `build_obs` / `sample_layout` 都是**并列分支**，不是重构）。
+- 🔴 **导出侧必然连带失效（范围外，只声明不修）**：`scripts/export_navvel_actor.py`
+  里硬编码 `obs_dim = 30 + 4*K + obs_safety_dim`，圆柱世界的 7 维/槽会让导出**静默算错维度**；
+  `K_SLOTS`、obs 布局、CBF 参考向量、`navvel_deploy.yaml` / `navvel_obstacles_box.yaml`
+  的 sha256 全部需要在部署侧同步。**状态：未完成、强依赖本轮结论**（用户已明确排除部署侧）。
+
+#### ⑦ CPU 证据（全部纯 CPU，Isaac 未导入）
+
+`scripts/cylinder_geometry_test.py` —— **14/14 PASS**：
+
+| 测试 | 关键数字 |
+|---|---|
+| t1 圆柱 SDF vs 独立采样的表面点云距离 | max err **5.6e-4**（atol 1e-2，3925 点） |
+| t2 穿越柱顶时 SDF 无跳变（红线） | 1 mm 步长上 max \|Δsdf\| = **1.000e-3**（Lipschitz=1；二元 z 门会给 ~0.3–0.9） |
+| t3 法向单位长 + ≡ ∇sdf | max \|‖n‖−1\| = **1.2e-7**，min cos(n,∇sdf) = **1.00000** |
+| t4 柱顶之上 / 柱底之下 / 旁侧 / 棱角 | SDF 与法向**精确**（err 1.6e-7 / 6.0e-8）；柱顶之上 `n̂ = (0,0,1)` |
+| t5a `clearances() ≡ sdf − (dr+infl)` | **0.0**（逐位） |
+| t5b 虚拟球复现 `h` 与 `n̂` | h 9.5e-7 / n 1.2e-7 |
+| t5c obs `sdf` 通道 ≡ `clearances()+pads` | sdf 3.0e-8 / rpos 2.4e-7 / n **0.0**（73/256 槽未被 clamp） |
+| t5d obs 障碍块 = K×7 = 28 ⇒ 全 obs 58 | ✓ |
+| t6a 对"严格单位法向"参考的残差 | 2.4e-6 —— **不是**新近似，是 `_gradients` 自带的 `dvec/(dist+1e-6)` 软化（球堆路径同样存在；虚拟球 dist≈2.8 反而比球堆 dist≈0.6 更小） |
+| t6b 用滤波器自己的 `(h,n)` 约定对拍 | **0.00e+00**（逐位一致） |
+| t7a/t7b `half_h→∞` = 无限柱 / `half_h→0` = 圆盘 | 精确 0.0（⚠️ **圆柱不退化为球**，"退化=球"的说法只对 CBF 层成立，见 t6） |
+| t7c 球堆路径 `cbf_geom` ≡ `(pos, r_safe+extra)` | **0.0 / 0.0**（A0–A4 CBF 装配未受影响） |
+| t8 `sample_layout_full()[:3]` ≡ `sample_layout()`（球堆） | `torch.equal` ✓（3 元组 API 未变） |
+
+`scripts/cylinder_layout_check.py` —— 布局不变量 9 项 PASS（单档 + 3 个真实 NP profile 端到端）：
+
+- 全槽激活 / `M == n` ✓；**任意两柱不重叠**（n=8: 最小中心距 1.1008 ≥ 2R=0.8486）✓
+- 间距 ≥ `min_gap_between × 0.9^(layout_tries−1)` ✓；keepout 边距 +0.000 ✓
+- 起终点净空 ✓；`0 ≤ z_lo`、`z_hi ≤ 2.6`、`H ≥ 0.5` ✓
+- 矮柱比例 0.285–0.303（目标 0.30，1024 柱样本）✓；obs 块有限、法向单位、未用槽**严格为 0** ✓
+- `min_corridor` 门禁：n=8/W=1.00 与 n=16/W=0.85 均 **certified = 1.000**（首次抽签即 100%，
+  逐 env 粘性重抽最多 15 轮；<0.99 的档位视为不可用于训练）✓
+
+**冻结口径回归**（改完重跑，全部原样通过）：`obstacle_geometry_test.py` ALL PASS、
+`pillar_geometry_test.py` ALL PASS、`cbf_test.py` all PASSED、
+`test_clearance_conventions.py` **8/8**。
+
+#### ⑧ 已知风险与未决（开训前须知）
+
+| # | 风险 | 状态 |
+|---|---|---|
+| R1 | `sim.replicate_physics=true` 下 PhysX **可能不跟随** per-clone `xformOp:scale` ⇒ 物理碰撞体保持原型高度 | **已设计规避**：prim 基准高度取**最低柱高**（0.5 m）⇒ 过期的碰撞体永远落在逻辑圆柱**内部**，绝不挡住合法飞越；且障碍接触本就不是终止判据。**须在 GPU 冒烟里目视确认** |
+| R2 | K=4 在 8 柱档会丢 4 根、16 柱档丢 12 根 | 用户选择"训完按 `dropped_relevant` 门槛（>1% 提请裁决）判"。**d8 档必须先量** |
+| R3 | `nominal_paper` from-scratch + 稀疏奖励，项目历史上有"零学习/熵塌缩"前科（§0.5.2 / `/memories/repo/navvel-nr1.md`） | 判据先写死：**5M 帧内 `pos_error` 不下降 ⇒ 停，先做单变量诊断，不许加权重** |
+| R4 | 导出侧（`export_navvel_actor.py` / `navvel_deploy.yaml` / K6）必然失效 | **范围外**，仅声明（见 ⑥） |
+
+#### ⑨ 术语表（改名验收）
+
+`naive` → **`obs_proximity`**：指"`cbf.mode=none` **且带 obstacle proximity 塑形**"的那个臂。
+- `cbf.mode: none` 键值语义**不变**（= CBF 关闭），它**不**区分有无 proximity 塑形。
+- 论文口径的 `Nominal` = `NP-nominal-paper-*`（只留稀疏碰撞惩罚）—— 与 `obs_proximity` 是**两个臂**。
+- `grep -rn naive` 的剩余命中分类（验收门）：① `scripts/wandb/**`、`scripts/outputs/**`、
+  `scripts/plot_d2_*.py` 里的**历史 run 名/图例**（用户明确要求保持原样）；② `learning/mappo.py`
+  的 `make_dataset_naive`（**同名但无关**的 MAPPO 采样函数）；③ `cbf.py` / `nav_vel.py` 里的
+  历史语义注释；④ `NP-obs-proximity-*.yaml` 表头里"renamed old `naive`"的说明；
+  ⑤ `NavVel.yaml` 的术语注记。**无一处是"该臂的新命名"**。
+
+#### ⑩ 下一步（**待用户裁决后才动 GPU**）
+
+**批次提案（§3.4 风格，锁档 + 顺序 warm-start 链代替在线课程）**
+
+1. **臂**：`nominal-paper` / `obs-proximity` / `dual-p0` / `dual-p1`（+ 可选 `filter-only-p1`）。
+2. **密度链**：每臂按 n=2 → 4 → 8 → 16 **顺序 warm-start**（`+init_ckpt=`）逐档跑，
+   每档 10M 帧（同 `--parallel 2`，实测 ≈325 s/run）。这样既满足"锁档 profile"的裁决，
+   又保留任务书要求的 2→4→8→16 难度阶梯。
+3. **seed**：3 seed 起步（`nominal-paper` 视 from-scratch 表现补到 5）。
+4. **验收**：`512×600`（对齐）+ `384×1500`（收口）+ **d8 密度协议**，每 ckpt × ON/OFF；
+   报告必须标 `rollout_steps`；两列数字**不得混表**。
+5. **必答的 3 个问题**（任务书 §3.2）：① `nominal_paper` 能否从零学会避障（对照
+   `obs_proximity` 的差值 = proximity 塑形的贡献）；② `dual-p0` 在新圆柱环境下是否仍是
+   撤-filter 最优；③ OFF 列是否存在"高到达 + 0 碰"的臂。
+6. **开训前**：先跑单 ckpt GPU 冒烟（`--num-envs 384 --steps 1500`，看 `[eval_metrics]` 行 +
+   目视 R1），因为 M 从 48 降到 8，显存应比上一轮**宽松**，但 Cylinder prim 与逐 episode
+   `xformOp:scale` 写入是全新的、未在 GPU 上跑过的路径。
+
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
 
 > **[2026-09-16 补]** 本节主体仍是 09-14 的快照。此后到 09-16 的进展见 **§0.5.20–0.5.24**，其中 §0.5.22–0.5.24 是**验收口径修复**（用户指令"开始完成第一步"）：
