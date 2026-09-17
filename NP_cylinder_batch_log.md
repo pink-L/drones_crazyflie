@@ -89,13 +89,16 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
 | 4 | **并行链互相杀**（2026-09-17 首次开批次后 8 分钟） | `chain_nominal-paper_s12.log` 写着 `post-run(s12 n2): killing 1 leftover GPU process(es): [1535144]`，而 **1535144 是 s11 的 train.py** ⇒ s11 的 n2 虽已写出 ckpt（ok=True）但随后的 n4 在 **5 秒**内被 SIGKILL，链中断。根因：**子进程把 `NAVVEL_BATCH_ROOT` 覆盖成了自己的 pid**，于是 `clear_gpu()` 的"兄弟保护"退化成"只保护自己人"，两条链互杀 | 只在**顶层**父进程设置 `NAVVEL_BATCH_ROOT`（子进程不覆盖）；并用 **2 条链并行**的自测（`--parallel 2`）复现验证——**上一版自测用的是 `--parallel 1`，没有兄弟，所以漏掉了** |
 | 5 | `--resume` 形同虚设 | 父进程打印 `resume: 2 stage(s) already ok`，但子进程仍从 **n2 重跑** | 子进程读的是**自己那份**（刚被清空的）链清单 ⇒ 新增 `--done-from <父清单>`；实测 `resume: nominal-paper s11 n2 already ok -> …` 后才起 n4 |
 | 6 | 中断即丢进度 | 父进程启动时**删掉**子清单，而父清单只在"整条链结束"时才汇总 ⇒ 被 kill 时中间档的成果丢失（s12/n2 就是这么丢的，白跑一档） | 不再删子清单；父进程**启动时自动合并**子清单（按 (arm,seed,level) 去重、保留最新） |
+| 7 | **台账静默漏行**（批次结束后才暴露） | 子清单文件名只按 **seed** 命名（`.child_manifest_s<seed>.json`），而队列是 seed 优先 ⇒ **同一波里两条同 seed 的链写同一个文件、互相覆盖** ⇒ `dual-p1 s13` 的 **4 档记录全丢**（训练本身正常，4 个 ckpt 都在磁盘上）。汇总还因此报出"56/57"这种看不懂的数 | ① 文件名改成 `.child_manifest_{arm}_s{seed}.json`；② 新增 `scripts/np_manifest_rebuild.py`：**从 wandb run dir 重建台账**（磁盘是真相，台账可丢），并按 project + seed 过滤（否则把 selftest 的 8 档 noise 也扫进来）。重建结果：**60 档 / 全 ok**（其中 5 档标记 `recovered=true`） |
 
-> 教训（值得记三条）：
+> 教训（值得记四条）：
 > 1. **冒烟只覆盖 n=8/n=16 ⇒ 漏掉了最低两档的越界 bug**；新代码路径的冒烟要覆盖**参数区间两端**。
 > 2. **自测要用生产配置**：驱动器自测当初用 `--parallel 1`（无兄弟进程）⇒ 兄弟互杀的 bug 没暴露；
 >    改成 `--parallel 2` 复现后才修掉。**"能跑通"与"能在并线下跑通"是两个命题。**
 > 3. **"我已经实现了 X 功能"要验证 X 真的发生**：`--resume` 打印了正确的提示却**不起作用**——
 >    标志位写对了、路径搞错了。凡"跳过/复用"类逻辑，必须看到**被跳过的那一项**出现在日志里。
+> 4. **台账不能是唯一副本**：任何"汇总表"都必须能从**不可丢的东西**（磁盘上的产物）重建。
+>    键（文件名）要包含**全部区分维度**——按 seed 命名却在同一 seed 下并行两条链，是设计错误而非运气问题。
 
 ---
 
@@ -137,29 +140,66 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
 
 ---
 
-## 5. 训练结果（跑完后回填）
+## 5. 训练结果（✅ 60/60 档产出 checkpoint；台账已按磁盘重建）
 
-> 数据源：`/tmp/navvel_np/np_chain_manifest.json` + wandb project `env_design_cyl`。
+**批次结束**：2026-09-18 **01:49**（15 条链全部 rc=0；预测区间 01:40–02:10 ✓）。
+**台账**：`/tmp/navvel_np/np_chain_manifest.json`（60 档全 ok，其中 5 档标 `recovered=true`）。
+**逐档汇总**：`/tmp/navvel_np/train_summary.txt`（由 `scripts/np_train_summary.py` 从 wandb run dir 的
+`files/output.log` 解析，纯 CPU；日志里只有 `entropy` 是逐迭代的，`pos_error` 被 tqdm 截断 ⇒ 不进文本）。
 
-| 臂 | seed | n=2 | n=4 | n=8 | n=16 | 备注 |
-|---|---|---|---|---|---|---|
-| nominal-paper | 11 |  |  |  |  | |
-| nominal-paper | 12 |  |  |  |  | |
-| nominal-paper | 13 |  |  |  |  | |
-| obs-proximity | 11 |  |  |  |  | |
-| obs-proximity | 12 |  |  |  |  | |
-| obs-proximity | 13 |  |  |  |  | |
-| dual-p0 | 11 |  |  |  |  | |
-| dual-p0 | 12 |  |  |  |  | |
-| dual-p0 | 13 |  |  |  |  | |
-| dual-p1 | 11 |  |  |  |  | |
-| dual-p1 | 12 |  |  |  |  | |
-| dual-p1 | 13 |  |  |  |  | |
+### 5.1 训练末值（最后一个 `train/stats` 块，3 seed 均值）
 
-**训练期必看曲线**（任务书 §3.1 的 from-scratch 风险判据）
-- `pos_error`：**若 5M 帧内不下降 ⇒ 停**，先做单变量诊断（密度/熵/奖励量级），**不许加权重**。
-- `entropy` / `std(a)`：是否塌缩（历史前科见 `/memories/repo/navvel-nr1.md`）。
-- `stats.arrival`、`stats.collision_episodes`、`term_obstacle_*` 分项。
+| 臂 | n | arrival | success | coll_ep | min_clr | **entropy(末)** | cbf_viol |
+|---|---|---|---|---|---|---|---|
+| nominal-paper | 2 | 0.723 | 0.723 | 0.000 | 1.842 | **8.027** | 0 |
+| nominal-paper | 4 | 0.520 | 0.520 | 0.000 | 1.013 | **8.027** | 0 |
+| nominal-paper | 8 | 0.365 | 0.365 | 0.000 | 0.543 | **8.027** | 0 |
+| nominal-paper | 16 | 0.248 | 0.248 | 0.000 | 0.307 | **8.027** | 0 |
+| obs-proximity | 2 | 0.697 | 0.697 | 0.000 | 1.806 | **8.027** | 0 |
+| obs-proximity | 4 | 0.529 | 0.529 | 0.000 | 1.043 | **8.027** | 0 |
+| obs-proximity | 8 | 0.397 | 0.397 | 0.000 | 0.566 | **8.027** | 0 |
+| obs-proximity | 16 | 0.261 | 0.261 | 0.000 | 0.312 | **8.027** | 0 |
+| dual-p0 | 2 | 0.225 | 0.225 | 0.000 | 1.831 | 0.873 | 0.186 |
+| dual-p0 | 4 | 0.375 | 0.375 | 0.000 | 1.062 | 1.684 | 0.469 |
+| dual-p0 | 8 | 0.293 | 0.293 | 0.000 | 0.582 | 2.055 | 0.660 |
+| dual-p0 | 16 | 0.206 | 0.206 | 0.000 | 0.360 | 2.404 | 0.847 |
+| dual-p1 | 2 | 0.225 | 0.225 | 0.000 | 1.946 | 0.481 | 0.050 |
+| dual-p1 | 4 | 0.750 | 0.750 | 0.000 | 1.560 | 1.300 | 0.123 |
+| dual-p1 | 8 | 0.668 | 0.668 | 0.000 | 0.861 | 1.296 | 0.289 |
+| dual-p1 | 16 | 0.565 | 0.565 | 0.000 | 0.596 | 1.542 | 0.376 |
+| filter-only-p1 | 2 | 0.641 | 0.641 | 0.000 | 2.286 | 0.749 | 0.096 |
+| filter-only-p1 | 4 | 0.828 | 0.828 | 0.000 | 1.536 | 0.867 | 0.205 |
+| filter-only-p1 | 8 | 0.648 | 0.648 | 0.000 | 0.834 | 1.207 | 0.571 |
+| filter-only-p1 | 16 | 0.561 | 0.561 | 0.000 | 0.552 | 1.602 | 0.817 |
+
+⚠️ 这些是**训练时（带探索噪声）**的 episode 级数值，**不是验收值**；确定性验收（贪心）才能回答 §6 的 3 个问题。
+
+### 5.2 ⚠️ 关键异常：两个非 CBF 臂的策略 std 被钉在**上限**
+
+`nominal-paper` 与 `obs-proximity` 的 entropy 在 n4/n8/n16 档**恒为 8.027**（与 seed、与档位无关）。
+验算：4 维高斯在 std = clamp 上限 1.8 时的熵 $=4\times\frac{1}{2}\ln(2\pi e\cdot1.8^2)=\mathbf{8.027}$ —— **完全相等**。
+⇒ 这两个臂的探索噪声从 n4 档起顶死在上限（1.8 m/s）；三个 CBF 臂则稳定在 std≈0.6–0.9（熵 1.2–2.4）。
+
+- **机制候选（待单变量诊断；任务书明令不许先扫权重）**：`algo.entropy_coef=0.05` 继承自旧批次，
+  那些批次靠很强的 `w_f` 前进 shaping 与熵奖励抗衡；论文口径的 `Nominal` 只有**稀疏碰撞惩罚**，
+  于是熵奖励占主导、把策略推向上限噪声。
+- **必须先看确定性验收**：std=1.8 时训练侧 arrival 被噪声主导，贪心均值的表现可能明显不同。
+- **不要**据此立刻改 `entropy_coef` 重跑 —— 先确认（a）确定性到达率是否也已受损，（b）是不是
+  「std 大但均值策略仍能飞」的假警报，再决定是否做单变量对照。
+
+### 5.3 其他观察（待验收确认，不得当作结论）
+
+- 全部 60 档 `collision_episodes = 0.000`：失败几乎都是**超时**而非碰撞；min_clearance 随密度下降
+  （n16 ≈ 0.31 m）。**但**这也可能意味着策略根本不接近障碍（"绕远"而非"避障"）—— 需用验收的
+  `min d_min` / 路径长度比 / `dropped_relevant` 去区分。
+- arrival 随密度单调下降（所有臂一致）⇒ 难度阶梯生效，不是自旋/卡死。
+- 训练侧 `nominal-paper` 与 `obs-proximity` 差别很小（n8: 0.365 vs 0.397；n16: 0.248 vs 0.261）
+  ⇒ 本轮 proximity 塑形在训练侧没拉开差距（与 P3b-1 的叙事不同，但那批是 warm-start + 另一套奖励口径）。
+
+**训练期必看曲线**（任务书 §3.1 的 from-scratch 风险判据，本节已按其执行）
+- `pos_error`：日志里不可得（tqdm 截断）⇒ **改用确定性验收 + 中途 ckpt**（`checkpoint_3309568`≈3.3M 帧）。
+- `entropy` / `std(a)`：见 §5.2 —— **不是塌缩，而是顶到上限**（历史前科是塌缩，方向相反）。
+- `stats.arrival`、`stats.collision_episodes`、`term_obstacle_*`：见表。
 
 ---
 
@@ -183,14 +223,32 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
 2. `dual-p0`（Reward Only）在**新圆柱环境**下是否仍是撤-filter 最优？
 3. 撤 filter（OFF 列）时，有没有**任何臂**能同时满足"高到达 + 0 碰"？
 
+### 6.1 🔴 开跑验收前的阻塞点（必须先解决）
+
+`scripts/acceptance_eval.py` 把 `--profile profiles/A0-legacy` 当作**固定几何快照**，
+那是**球堆口径（obs 62）**，与本批次的圆柱 ckpt（obs 58，且每臂/每档的 profile 都不同）**不兼容**——
+`eval_ckpt.py` 的 obs 护栏会直接报错（这正是它存在的意义）。
+
+⇒ 本批次的验收需要一个**按 ckpt 的 (arm, level) 逐个换 profile** 的驱动
+（`profiles/NP-<arm>-n<level>`），并且要同时跑两个协议（`512×600` 对齐 + `384×1500` 收口）× ON/OFF。
+**方案（待用户裁决）**：新增 `scripts/np_acceptance_eval.py`（复用 `acceptance_eval.py` 的 spec/`run_one`/汇总，
+只把 profile 变成 per-spec 参数），先只跑**有区分度的切片**回答上面 3 个问题：
+
+- **切片 A（先跑）**：n=8（= P3b-1 的 d8 协议，唯一有区分度）+ n=16（诊断档），5 臂 × 3 seed × {ON,OFF}，
+  `--num-envs 384 --steps 1500` ⇒ **60 次 eval**（串行，不能并行冷启动多个 Isaac：历史教训）；
+- **切片 B（按需）**：n=2/n=4（低保真，预期饱和）+ `512×600` 对齐列；
+- 必测 `dropped_relevant_frac`（K=4 风险点，n=8 与 n=16 都要报）。
+
 ---
 
 ## 7. 待办 / 风险
 
-- [ ] 训练批次 48 档（进行中）
-- [ ] 训练期曲线检查（§5 的 from-scratch 判据；`nominal-paper` 每档都要看）
-- [ ] 双协议 + d8 验收（§6）
+- [x] 训练批次 **60 档**（2026-09-18 01:49 完成，60/60 产出 ckpt）
+- [x] 训练期曲线检查（§5；结论：**没塌缩，但两个非 CBF 臂 std 顶到上限**）
+- [x] 台账修复（§3 问题 7：`np_manifest_rebuild.py` 从磁盘重建，60 档全 ok）
+- [ ] **验收**（§6）：需先做 per-ckpt profile 的驱动（`acceptance_eval.py` 默认 A0 球堆口径不兼容）
 - [ ] `dropped_relevant_frac` 在 n=8 / n=16 档上报（K=4 的风险点）
+- [ ] §5.2 的 std 上限问题做**单变量诊断**（先看确定性验收再决定，不许先扫权重）
 - [ ] 目视确认 R1（物理圆柱高度是否跟随 per-episode scale）
 - [ ] 导出侧同步（**范围外**，与用户确认后再做）
 - [ ] 结论写回 plan（新开 `§0.5.31`），**包括失败与"无法区分"的结论**
