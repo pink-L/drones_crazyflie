@@ -1892,17 +1892,29 @@ obs 从 `[rpos, 半径]`(4 维/槽) 升级为 `[rpos, sdf, n̂]`(7 维/槽)。
 = `h + (drone_radius + inflation + cbf_extra)`。**策略看到的世界 = 它被判的世界**（t5a/t5b/t5c）。
 窗口选择按 **`sdf`** 而非中心距（柱高随机后两者排序会分歧：远端矮柱可能挤掉近端高柱）。
 
-#### ⑤ 密度阶梯（CPU 探针实测，`cylinder_layout_check.py --ladder`，64 envs/layout）
+#### ⑤ 密度阶梯（CPU 探针实测 → 按"首次通过率"定档）
 
-| n | R=0.4243 可行 max W | 其它 R | 选中阶梯 |
-|---|---|---|---|
-| 2 | **1.34** ✓ | — | `R=0.4243, W=1.34` |
-| 4 | **1.34** ✓ | — | `R=0.4243, W=1.34` |
-| 8 | 1.00（1.34 不达标） | R=0.30 → 1.34 ✓ | `R=0.4243, W=1.00` |
-| 16 | 0.30（W≥0.85 时**柱间不重叠**都做不到） | R=0.30 → 0.85；R=0.22/0.18 → 1.00 | `R=0.30, W=0.85` |
+`cylinder_layout_check.py --ladder` 给出的是**粘性重抽之后**的 certified（训练实际拿到的），
+但**这个数字单独看会骗人**：n=16/R=0.30/W=0.85 报 certified=1.000，而 256-env GPU 冒烟仍出现
+**1/256 未验证布局/每次重置**，因为它的**首次抽签**通过率只有 0.211。故定档判据改为：
 
-**决策原则**：R=0.4243（0.6 m 方柱外接圆 = 部署保守量）能用的档位就不动 R，只在 n=16
-才降到 R=0.30。⚠️ 副作用须记住：**n=16 档的柱更细**（R 0.4243→0.30），跨档比较不是单变量。
+> **首次抽签通过率 ≥ ~0.5**（粘性重抽才能在 2–3 轮内收敛，落回未验证布局的 env <0.1%）。
+
+实测（128 envs × 2 layouts，2026-09-17）：
+
+| n | R (m) | W (m) | 首次通过率 | certified（含重抽） |
+|---|---|---|---|---|
+| 2 | 0.4243 | 1.34 | 0.934 | 1.000 |
+| 4 | 0.4243 | 1.34 | 0.793 | 1.000 |
+| 8 | 0.4243 | **1.00** | 0.539 | 1.000 |
+| 16 | 0.30 | **0.70** | 0.656 | 1.000 |
+
+被否掉的候选（记录以免重走）：n=8 W=1.34（不可行）；n=16 R=0.4243 时 W≥0.85 连柱间不重叠都做不到
+（W=0.40 才 0.734）；n=16 R=0.30 W=0.85（**首次仅 0.211**）；n=16 R=0.2243 W=1.00（0.434）；
+n=16 R=0.30 W=0.55（0.977，但走廊更窄，不必付这个代价）。
+
+**决策原则**：R=0.4243（0.6 m 方柱外接圆 = 部署保守量）能用的档位就不动 R，只在 n=16 才降到 R=0.30。
+⚠️ 副作用须记住：**n=16 档的柱更细**（R 0.4243→0.30），跨档比较不是单变量。
 面积上界的粗估（n=8 时 W≤0.85）比实测**保守**（实测 1.00 可行）—— 记录以免后人把它当结论。
 
 #### ⑥ 护栏与"不可比"声明
@@ -1919,7 +1931,7 @@ obs 从 `[rpos, 半径]`(4 维/槽) 升级为 `[rpos, sdf, n̂]`(7 维/槽)。
 
 #### ⑦ CPU 证据（全部纯 CPU，Isaac 未导入）
 
-`scripts/cylinder_geometry_test.py` —— **14/14 PASS**：
+`scripts/cylinder_geometry_test.py` —— **16/16 PASS**：
 
 | 测试 | 关键数字 |
 |---|---|
@@ -1936,6 +1948,7 @@ obs 从 `[rpos, 半径]`(4 维/槽) 升级为 `[rpos, sdf, n̂]`(7 维/槽)。
 | t7a/t7b `half_h→∞` = 无限柱 / `half_h→0` = 圆盘 | 精确 0.0（⚠️ **圆柱不退化为球**，"退化=球"的说法只对 CBF 层成立，见 t6） |
 | t7c 球堆路径 `cbf_geom` ≡ `(pos, r_safe+extra)` | **0.0 / 0.0**（A0–A4 CBF 装配未受影响） |
 | t8 `sample_layout_full()[:3]` ≡ `sample_layout()`（球堆） | `torch.equal` ✓（3 元组 API 未变） |
+| t9 **M < K**（锁档 n=2 / n=4） | 窗口补齐安全：block = K×7、有效槽数 = n、补齐行严格为 0 —— **这条是回归护栏**：首版没钳 topk 索引上界，n=2/n=4 档在第一次 `build_obs` 就崩 `index 3 is out of bounds for dimension 1 with size 2`，而 n=8/n=16 冒烟完全看不出来 |
 
 `scripts/cylinder_layout_check.py` —— 布局不变量 9 项 PASS（单档 + 3 个真实 NP profile 端到端）：
 
@@ -1954,7 +1967,7 @@ obs 从 `[rpos, 半径]`(4 维/槽) 升级为 `[rpos, sdf, n̂]`(7 维/槽)。
 
 | # | 风险 | 状态 |
 |---|---|---|
-| R1 | `sim.replicate_physics=true` 下 PhysX **可能不跟随** per-clone `xformOp:scale` ⇒ 物理碰撞体保持原型高度 | **已设计规避**：prim 基准高度取**最低柱高**（0.5 m）⇒ 过期的碰撞体永远落在逻辑圆柱**内部**，绝不挡住合法飞越；且障碍接触本就不是终止判据。**须在 GPU 冒烟里目视确认** |
+| R1 | `sim.replicate_physics=true` 下 PhysX **可能不跟随** per-clone `xformOp:scale` ⇒ 物理碰撞体保持原型高度 | **已设计规避**：prim 基准高度取**最低柱高**（0.5 m）⇒ 过期的碰撞体永远落在逻辑圆柱**内部**，绝不挡住合法飞越；且障碍接触本就不是终止判据。**冒烟已确认写入真实发生**（`z-scale writes: envs=128/256 M=8/16 wrote=1024/4096 invalid_prim=0 missing_xformOp:scale=0`）；**物理体是否跟随未目视确认**（待 GUI 演示） |
 | R2 | K=4 在 8 柱档会丢 4 根、16 柱档丢 12 根 | 用户选择"训完按 `dropped_relevant` 门槛（>1% 提请裁决）判"。**d8 档必须先量** |
 | R3 | `nominal_paper` from-scratch + 稀疏奖励，项目历史上有"零学习/熵塌缩"前科（§0.5.2 / `/memories/repo/navvel-nr1.md`） | 判据先写死：**5M 帧内 `pos_error` 不下降 ⇒ 停，先做单变量诊断，不许加权重** |
 | R4 | 导出侧（`export_navvel_actor.py` / `navvel_deploy.yaml` / K6）必然失效 | **范围外**，仅声明（见 ⑥） |
@@ -1970,23 +1983,42 @@ obs 从 `[rpos, 半径]`(4 维/槽) 升级为 `[rpos, sdf, n̂]`(7 维/槽)。
   历史语义注释；④ `NP-obs-proximity-*.yaml` 表头里"renamed old `naive`"的说明；
   ⑤ `NavVel.yaml` 的术语注记。**无一处是"该臂的新命名"**。
 
-#### ⑩ 下一步（**待用户裁决后才动 GPU**）
+#### ⑩ 冒烟（✅ 已做）与批次（✅ 2026-09-17 已开训）
 
-**批次提案（§3.4 风格，锁档 + 顺序 warm-start 链代替在线课程）**
+**GPU 冒烟 4 组全部通过**（`max_iters=60` ⇒ 覆盖 T=1500 的 episode 重置，即逐 episode scale
+写入路径；`wandb.mode=disabled`，不污染正式项目；逐条日志见 `drones/NP_cylinder_batch_log.md` §2）：
 
-1. **臂**：`nominal-paper` / `obs-proximity` / `dual-p0` / `dual-p1`（+ 可选 `filter-only-p1`）。
-2. **密度链**：每臂按 n=2 → 4 → 8 → 16 **顺序 warm-start**（`+init_ckpt=`）逐档跑，
-   每档 10M 帧（同 `--parallel 2`，实测 ≈325 s/run）。这样既满足"锁档 profile"的裁决，
-   又保留任务书要求的 2→4→8→16 难度阶梯。
-3. **seed**：3 seed 起步（`nominal-paper` 视 from-scratch 表现补到 5）。
-4. **验收**：`512×600`（对齐）+ `384×1500`（收口）+ **d8 密度协议**，每 ckpt × ON/OFF；
-   报告必须标 `rollout_steps`；两列数字**不得混表**。
-5. **必答的 3 个问题**（任务书 §3.2）：① `nominal_paper` 能否从零学会避障（对照
-   `obs_proximity` 的差值 = proximity 塑形的贡献）；② `dual-p0` 在新圆柱环境下是否仍是
-   撤-filter 最优；③ OFF 列是否存在"高到达 + 0 碰"的臂。
-6. **开训前**：先跑单 ckpt GPU 冒烟（`--num-envs 384 --steps 1500`，看 `[eval_metrics]` 行 +
-   目视 R1），因为 M 从 48 降到 8，显存应比上一轮**宽松**，但 Cylinder prim 与逐 episode
-   `xformOp:scale` 写入是全新的、未在 GPU 上跑过的路径。
+| # | 覆盖 | 结果 |
+|---|---|---|
+| A | `nominal-paper-n8` @128 envs（mode=none） | exit=0、**0 WARN**、`M=8 Cylinder prims`、`total obs 58`、`z-scale wrote=1024`、ckpt 已写 |
+| B | `dual-p1-n16` @256 envs（CBF filter 路径） | exit=0、`cbf_violation 0.003–0.043`、`cbf_corr ≤1.1e-2`（无爆炸/NaN） |
+| B2 | 同上 W 0.85→**0.70** 重跑 | exit=0、**0 WARN**（未验证布局告警消失） |
+| C | `dual-p0-n8` @128 envs（p=0 软蒸馏） | exit=0、**0 WARN**、`term_cbf_viol/corr ≈ −2.4e-3` |
+
+冒烟过程中抓到并修掉 **3 个问题**：
+1. **`M < K` 索引越界**（n=2/n=4 档第一次 `build_obs` 即崩：`index 3 is out of bounds for
+   dimension 1 with size 2`）—— 冒烟只挑 n=8/n=16 会漏掉，是 CPU 布局探针跑 n=2 才暴露的。
+   已修（topk 索引上界钳制）+ 加单测 t9。
+   **教训：新路径的冒烟要覆盖参数区间的两端（最小/最大密度），不能只挑中间值。**
+2. **密度链驱动器 fork bomb**：构造了子进程 `env`（含 `NP_CHAIN_CHILD=1`）却**忘了传给
+   `Popen`** ⇒ 子进程重入调度器再启子进程（10 个空转进程、GPU 零负载）。已修（`env=`/`cwd=`
+   都传）+ 启动前 `assert` 标记存在。
+3. **n=16 门禁过紧**（见⑤）：W=0.85 首次通过率仅 0.211 ⇒ 粘性重抽 15 轮后仍留 1/256 未验证布局，
+   改为 W=0.70。
+
+**批次（已启动）**
+- 4 臂（`nominal-paper` / `obs-proximity` / `dual-p0` / `dual-p1`）× 锁档 {2,4,8,16} × 3 seed
+  = **48 档**，**顺序 warm-start 链**，每档 10M 帧、`save_interval=100`、`--parallel 2`（2 条链并行）。
+  **n=2 档是真正的 from-scratch**（`init_ckpt=from-scratch`，满足"不许 warm 自 A4"）。
+- 驱动器 `scripts/np_chain_batch.py`（`train_batch.py` 只能传一个 `--init-ckpt`，无法表达
+  per-(arm,seed) 链）；清单 `/tmp/navvel_np/np_chain_manifest.json`（每档 ckpt/sha256/wandb_run/耗时）。
+- wandb：project `env_design_cyl`，group `NavVel-NP-<arm>`，run `cfb-cyl-<arm>-s<seed>-n<level>-final`。
+- 实测 ~59k frames/s（1024 envs，单 run）⇒ 每档 ≈220 s ⇒ 48 档 ÷ 2 ≈ **1.5 h**；
+  GPU 显存 6.6–7.1 GiB/进程（旧 M=48 时约 11 GiB）。
+- **流水账文档 = `drones/NP_cylinder_batch_log.md`**（用户要求新开；数字只从
+  日志/manifest/`agg.json` 读）。
+- **验收**：`512×600` + `384×1500` + **d8 密度协议**，每 ckpt × ON/OFF；**必测
+  `dropped_relevant_frac`（K=4 的风险点）**；结论写回 plan 新开 `§0.5.31`（含失败与"无法区分"）。
 
 ### 0.6 进度快照（**2026-09-14**）—— 当前所处阶段、已完成/未完成、待决策
 
