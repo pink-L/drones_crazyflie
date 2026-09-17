@@ -86,9 +86,12 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
 | 1 | `M < K` 时窗口补齐列越界 | `_build_obs_cylinder` 在 n=2/n=4 档崩：`index 3 is out of bounds for dimension 1 with size 2`（n=8/n=16 冒烟看不出来，是 CPU 布局探针跑 n=2 才暴露的） | `idx.clamp(min=0, max=self.M-1)` + 新增单测 t9（n=2/n=4） |
 | 2 | 密度链驱动器 **fork bomb** | 我构造了子进程 `env`（含 `NP_CHAIN_CHILD=1`）却**忘了传给 `Popen`** ⇒ 子进程重入调度器、再启子进程，10 个空转进程、GPU 无任何负载 | `Popen(..., env=child_env, cwd=TB.HERE)` + 启动前 `assert` 标记存在 |
 | 3 | n=16 档门禁过紧 | W=0.85 首次通过率仅 0.211 ⇒ 粘性重抽 15 轮后仍有 1/256（1024 env 约 4 个）落回**未验证布局** | 按"首次通过率 ≥ ~0.5"重选 W=0.70（0.656），并把这个判据写进 `make_np_profiles.py` |
+| 4 | **并行链互相杀**（2026-09-17 首次开批次后 8 分钟） | `chain_nominal-paper_s12.log` 写着 `post-run(s12 n2): killing 1 leftover GPU process(es): [1535144]`，而 **1535144 是 s11 的 train.py** ⇒ s11 的 n2 虽已写出 ckpt（ok=True）但随后的 n4 在 **5 秒**内被 SIGKILL，链中断。根因：**子进程把 `NAVVEL_BATCH_ROOT` 覆盖成了自己的 pid**，于是 `clear_gpu()` 的"兄弟保护"退化成"只保护自己人"，两条链互杀 | 只在**顶层**父进程设置 `NAVVEL_BATCH_ROOT`（子进程不覆盖）；并用 **2 条链并行**的自测（`--parallel 2`）复现验证——**上一版自测用的是 `--parallel 1`，没有兄弟，所以漏掉了** |
 
-> 教训（值得记）：**冒烟只覆盖 n=8/n=16 ⇒ 漏掉了最低两档的越界 bug**；以后新代码路径的冒烟要
-> 覆盖**参数区间的两端**（最小/最大密度），而不是挑一个中间值。
+> 教训（值得记两条）：
+> 1. **冒烟只覆盖 n=8/n=16 ⇒ 漏掉了最低两档的越界 bug**；新代码路径的冒烟要覆盖**参数区间两端**。
+> 2. **自测要用生产配置**：驱动器自测当初用 `--parallel 1`（无兄弟进程）⇒ 兄弟互杀的 bug 没暴露；
+>    改成 `--parallel 2` 复现后才修掉。**"能跑通"与"能在并线下跑通"是两个命题。**
 
 ---
 
@@ -102,8 +105,8 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
 - **帧数**：每档 10M frames（104 迭代 @1024 envs），`save_interval=100`
 - **并行**：2 条链（=2 个 Isaac 进程，`--parallel 2` 是硬上限）
 - **wandb**：project `env_design_cyl`，group `NavVel-NP-<arm>`，run_name `cfb-cyl-<arm>-s<seed>-n<level>-final`
-- **实测吞吐**：~59k frames/s（1024 envs，单 run，自测）⇒ 每档 ≈ 170 s + 启动 ≈ 220 s，
-  48 档 ÷ 2 并行 ≈ **1.5 h**
+- **实测吞吐**：~46–61k frames/s（1024 envs；**每档实测 ≈350 s**：s11/n2 = 353 s 含启动与 teardown）
+  ⇒ 47 档（1 档已被 `--resume` 复用）÷ 2 并行 ≈ **2.3 h**
 - **启动命令**：
   ```bash
   cd OmniDrones/scripts
@@ -111,11 +114,16 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
     --arms nominal-paper obs-proximity dual-p0 dual-p1 \
     --levels 2 4 8 16 --seeds 11 12 13 --parallel 2 \
     --project env_design_cyl --frames-per-level 10000000 \
-    --logdir /tmp/navvel_np
+    --logdir /tmp/navvel_np --resume
   ```
-- **自测**（驱动器验证，独立项目，2 个 400k 帧的小 run）：project `np_chain_selftest`，
-  run `run-20260917_221633-5wuz1a0l`(n2) / `run-20260917_221740-o637mm9h`(n4)，
-  证明链式 warm-start 与 ckpt 发现可用。
+- **开训历史（诚实记录）**：
+  1. 22:19 首次启动 → 22:27 发现**并行链互杀**（§3 问题 4），主动停机止损（损失 1 档 n2 的 GPU 时间，
+     该档 ckpt 已写出且被 `--resume` 复用）；
+  2. 修好后先跑 **2 条链并行**自测（`--parallel 2`、8 档）→ **8/8 ok、0 次互杀**；
+  3. 22:5x 用 `--resume` 重启正式批次。
+- **自测**（驱动器验证）：project `np_chain_selftest`。①单链 2 档（`run-20260917_221633-5wuz1a0l`
+  n2 / `run-20260917_221740-o637mm9h` n4）证明链式 warm-start 与 ckpt 发现；
+  ②**双链并行 8 档**证明兄弟保护（这是暴露互杀 bug 的配置）。
 
 **产物清单**：`/tmp/navvel_np/np_chain_manifest.json`（每档 arm/seed/level/ok/ckpt/sha256/wandb_run/耗时），
 每档训练日志 `/tmp/navvel_np/train_<arm>_s<seed>_n<level>.log`，每条链日志 `/tmp/navvel_np/chain_<arm>_s<seed>.log`。
