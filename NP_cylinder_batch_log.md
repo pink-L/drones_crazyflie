@@ -87,26 +87,33 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
 | 2 | 密度链驱动器 **fork bomb** | 我构造了子进程 `env`（含 `NP_CHAIN_CHILD=1`）却**忘了传给 `Popen`** ⇒ 子进程重入调度器、再启子进程，10 个空转进程、GPU 无任何负载 | `Popen(..., env=child_env, cwd=TB.HERE)` + 启动前 `assert` 标记存在 |
 | 3 | n=16 档门禁过紧 | W=0.85 首次通过率仅 0.211 ⇒ 粘性重抽 15 轮后仍有 1/256（1024 env 约 4 个）落回**未验证布局** | 按"首次通过率 ≥ ~0.5"重选 W=0.70（0.656），并把这个判据写进 `make_np_profiles.py` |
 | 4 | **并行链互相杀**（2026-09-17 首次开批次后 8 分钟） | `chain_nominal-paper_s12.log` 写着 `post-run(s12 n2): killing 1 leftover GPU process(es): [1535144]`，而 **1535144 是 s11 的 train.py** ⇒ s11 的 n2 虽已写出 ckpt（ok=True）但随后的 n4 在 **5 秒**内被 SIGKILL，链中断。根因：**子进程把 `NAVVEL_BATCH_ROOT` 覆盖成了自己的 pid**，于是 `clear_gpu()` 的"兄弟保护"退化成"只保护自己人"，两条链互杀 | 只在**顶层**父进程设置 `NAVVEL_BATCH_ROOT`（子进程不覆盖）；并用 **2 条链并行**的自测（`--parallel 2`）复现验证——**上一版自测用的是 `--parallel 1`，没有兄弟，所以漏掉了** |
+| 5 | `--resume` 形同虚设 | 父进程打印 `resume: 2 stage(s) already ok`，但子进程仍从 **n2 重跑** | 子进程读的是**自己那份**（刚被清空的）链清单 ⇒ 新增 `--done-from <父清单>`；实测 `resume: nominal-paper s11 n2 already ok -> …` 后才起 n4 |
+| 6 | 中断即丢进度 | 父进程启动时**删掉**子清单，而父清单只在"整条链结束"时才汇总 ⇒ 被 kill 时中间档的成果丢失（s12/n2 就是这么丢的，白跑一档） | 不再删子清单；父进程**启动时自动合并**子清单（按 (arm,seed,level) 去重、保留最新） |
 
-> 教训（值得记两条）：
+> 教训（值得记三条）：
 > 1. **冒烟只覆盖 n=8/n=16 ⇒ 漏掉了最低两档的越界 bug**；新代码路径的冒烟要覆盖**参数区间两端**。
 > 2. **自测要用生产配置**：驱动器自测当初用 `--parallel 1`（无兄弟进程）⇒ 兄弟互杀的 bug 没暴露；
 >    改成 `--parallel 2` 复现后才修掉。**"能跑通"与"能在并线下跑通"是两个命题。**
+> 3. **"我已经实现了 X 功能"要验证 X 真的发生**：`--resume` 打印了正确的提示却**不起作用**——
+>    标志位写对了、路径搞错了。凡"跳过/复用"类逻辑，必须看到**被跳过的那一项**出现在日志里。
 
 ---
 
 ## 4. 训练批次配置
 
-- **臂**：`nominal-paper`（论文 `Nominal`）、`obs-proximity`（旧 `naive` 正名）、`dual-p0`（论文 `Reward Only`）、`dual-p1`（论文 `Dual`）
-  （可选第 5 臂 `filter-only-p1` = 论文 `Filter Only`；本轮先跑 4 臂）
+- **臂（5 个，2026-09-17 用户追加第 5 臂）**：`nominal-paper`（论文 `Nominal`）、`obs-proximity`（旧 `naive` 正名）、
+  `dual-p0`（论文 `Reward Only`）、`dual-p1`（论文 `Dual`）、`filter-only-p1`（论文 `Filter Only`）
+- **档数**：5 臂 × 4 锁档密度 × 3 seed = **60 档**
+- **队列顺序 = seed 优先**（`for s in seeds: for arm in arms`）：先让**5 个臂各跑完一条 s11 链**
+  （≈1 h）⇒ 中期就能拿到 5 臂的完整密度阶梯做对照，而不是先跑完一个臂等 2 h。
 - **密度链**：n = 2 → 4 → 8 → 16，**顺序 warm-start**（每档 profile 锁死，链式等价于任务书要的 2→4→8→16 课程；
   用户 2026-09-17 裁决"不做在线升档"）。**n=2 档是真正的 from-scratch**（`nominal_paper` 不许 warm 自 A4）。
 - **seed**：11 / 12 / 13（3 seed 起步；`nominal-paper` 视 from-scratch 表现补到 5）
 - **帧数**：每档 10M frames（104 迭代 @1024 envs），`save_interval=100`
 - **并行**：2 条链（=2 个 Isaac 进程，`--parallel 2` 是硬上限）
 - **wandb**：project `env_design_cyl`，group `NavVel-NP-<arm>`，run_name `cfb-cyl-<arm>-s<seed>-n<level>-final`
-- **实测吞吐**：~46–61k frames/s（1024 envs；**每档实测 ≈350 s**：s11/n2 = 353 s 含启动与 teardown）
-  ⇒ 47 档（1 档已被 `--resume` 复用）÷ 2 并行 ≈ **2.3 h**
+- **实测吞吐**：~46–61k frames/s（1024 envs；**每档实测 ≈350 s**：s11/n2 = 353 s、s12/n2 = 349 s，含启动与 teardown）
+  ⇒ 60 档中已复用 2 档（`--resume`）⇒ 剩 58 档 ÷ 2 并行 ≈ **2.8 h**（预计 **2026-09-18 01:40 前后**跑完）
 - **启动命令**：
   ```bash
   cd OmniDrones/scripts
