@@ -278,6 +278,31 @@ torch → `cuda_available=False`，`Error 804: forward compatibility was attempt
 ③ 报「CUDA 不可用」时必须同时打印**内核模块版本 vs 用户态库版本**，否则无法与「卡被别人占用/显存不足」区分；
 ④ 自检必须在**真实环境**下跑一次（这次靠 `--preflight-only` 才发现守卫本身有 bug）。
 
+### 6.3 驱动恢复后的开跑流程（用户 2026-09-18 已确认：先回归、再开切片 A）
+
+用户裁决：① 稍后自行重启机器，恢复后通知我；② **开 60 次之前先做环境回归**（重启换驱动属环境变更，
+必须先确认 obs 58 的圆柱世界仍能建起来）。恢复后的固定动作：
+
+```bash
+cd /home/lz/lzspace/drones/OmniDrones/scripts
+# 1) 预检：NVML 正常 + torch 能看到卡，否则立即停（不要硬跑）
+python np_acceptance_eval.py --preflight-only
+#   期望：preflight: torch 2.7.0+cu128 cuda True | GPU free
+# 2) 前置条件复核（不碰 GPU）：60 条 spec 的 profile 与 ckpt 逐条核对
+python np_acceptance_eval.py --plan
+# 3) 环境回归冒烟：1 臂 × 1 档 × 1 seed × ON/OFF，小规模，只验管线与 obs 宽度
+python np_acceptance_eval.py --arms nominal-paper --levels 8 --seeds 11 \
+       --num-envs 64 --steps 200 --outdir /tmp/navvel_np/eval_smoke
+#   期望：2/2 产出 [eval_metrics]，日志里 obs layout 为该档的 slot_dim/K，
+#         冒烟数字不得进入任何结论（规模不符协议）
+# 4) 切片 A 正式开跑（60 次，串行；驱动自带每轮 progress/ETA）
+python np_acceptance_eval.py --num-envs 384 --steps 1500 \
+       --outdir /tmp/navvel_np/eval 2>&1 | tee /tmp/navvel_np/eval/driver.log
+```
+
+产物：`/tmp/navvel_np/eval/<tag>.log`（每次一个）、`eval_seed_tables.md`（每 seed 一节，跑完即落）、
+`rows_seed<seed>.json`、`rows_all.json`（三 seed 合并的原始指标，供复核）。
+
 ---
 
 ## 7. 待办 / 风险
