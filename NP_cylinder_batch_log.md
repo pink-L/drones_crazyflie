@@ -303,6 +303,34 @@ python np_acceptance_eval.py --num-envs 384 --steps 1500 \
 产物：`/tmp/navvel_np/eval/<tag>.log`（每次一个）、`eval_seed_tables.md`（每 seed 一节，跑完即落）、
 `rows_seed<seed>.json`、`rows_all.json`（三 seed 合并的原始指标，供复核）。
 
+### 6.4 驱动恢复后的环境回归（2026-09-18 09:0x，全部通过）
+
+| 步骤 | 结果 |
+|---|---|
+| 驱动版本 | 内核态 `580.178.04` **=** 用户态 `580.178.04`（重启生效） |
+| `--preflight-only` | `torch 2.7.0+cu128 cuda True \| GPU free`（显存 2 MiB） |
+| `--plan` | 60 条 spec 的 20 个 profile + 60 个 ckpt 逐条核对，`all present` |
+| 环境回归冒烟 | `nominal-paper` n8 ×ON/OFF `2/2 OK`；`filter-only-p1` n8 ×ON/OFF `2/2 OK`，圆柱世界正常建起（`z-scale wrote=3072`，`invalid_prim=0`） |
+
+**冒烟顺带查清的一件事（重要，影响读数方式）**：`cbf.mode=none` 的臂**没有滤波器**——
+`build_cbf_filter` 在该模式下返回 `None`，实测 ON 与 OFF 的 44 个指标字段**只有 `runtime_filter` 本身不同**，
+且 CBF 诊断键（`intervened_step_frac`/`cbf_diag_steps`/`h_below0_frac`/`corr_*`）**整体缺失**。因此：
+
+- `nominal-paper` / `obs-proximity` 的 ON 与 OFF 是**构造等同**，不是"实测相同"；
+- 那两行的"依赖度 = 1.000"**不构成任何证据**（没有滤波器可撤），`interv` 只能 n/a；
+- 已在 `np_acceptance_eval.py` 的表格下自动附 `cbf.mode` 图例，避免误读。
+
+反面验证：`filter-only-p1`（`mode=filter_only`）在小规模冒烟里 ON `coll=0` / OFF `coll=2`，诊断键齐全
+（`interv` ON 0.937 / OFF 0.932）⇒ ON/OFF 确实产生不同行为，方向与设计一致。
+（小规模冒烟的数字**不进入任何结论**。）
+
+启动：2026-09-18 08:51:26（tmux `np_eval`），`384x1500`，串行。实测单次 **39–61 s**（n8 约 39 s，n16 约 50–61 s），
+均值 0.7–0.8 min/spec，单次显存峰值约 17.8 GiB。
+
+新增工具 `scripts/np_eval_report.py`：只读 `rows_all.json` 生成最终报告——**逐条对照 §6 冻结门槛的判定表**、
+三 seed `mean[min..max]` 主表（含 ON/OFF 两侧的 `min_clr`/诊断量）、3 个基准问题的自动作答
+（凡"A 比 B 好"都附逐 seed 差值与符号一致性；n=3 时 3/3 同号只说明"无反转"，**不构成 p<0.05**）。
+
 ---
 
 ## 7. 待办 / 风险
