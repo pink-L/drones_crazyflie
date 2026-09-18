@@ -197,9 +197,36 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
   ⇒ 本轮 proximity 塑形在训练侧没拉开差距（与 P3b-1 的叙事不同，但那批是 warm-start + 另一套奖励口径）。
 
 **训练期必看曲线**（任务书 §3.1 的 from-scratch 风险判据，本节已按其执行）
-- `pos_error`：日志里不可得（tqdm 截断）⇒ **改用确定性验收 + 中途 ckpt**（`checkpoint_3309568`≈3.3M 帧）。
+- `pos_error`：~~日志里不可得（tqdm 截断）~~ —— **❗ 2026-09-18 更正：这个说法是错的**。
+  `pos_error` **就在 `train/stats` 块里**（`np_train_summary.py` 的 `BLOCK_RE` 能直接解析，见 §5.4），
+  当时只看了 tqdm 的 postfix 就下了结论。⇒ 训练期 from-scratch 判据**本来就可判**，无需等到验收。
 - `entropy` / `std(a)`：见 §5.2 —— **不是塌缩，而是顶到上限**（历史前科是塌缩，方向相反）。
 - `stats.arrival`、`stats.collision_episodes`、`term_obstacle_*`：见表。
+
+### 5.4 逐 seed 训练末值（2026-09-18 补；含 `dual-p0` 崩坏的训练期溯源）
+
+完整表：`/tmp/navvel_np/train_per_seed.txt`（解析脚本不改仓库，直接复用 `np_train_summary.parse_stage`）。
+
+**① `dual-p0` 的 seed 13 在训练期就已经异常**（与 §6.5 的验收崩坏同一 seed）：
+
+| 臂 | n | seed | arrival | `pos_error` | `cbf_violation` | entropy(末) |
+|---|---|---|---|---|---|---|
+| dual-p0 | 8 | 11 | 0.335 | 2.72 | 0.471 | 1.427 |
+| dual-p0 | 8 | 12 | 0.418 | 2.46 | 0.748 | 1.701 |
+| dual-p0 | 8 | **13** | **0.126** | 2.56 | 0.760 | **3.037** |
+| dual-p0 | 16 | 11 | 0.288 | 3.22 | 0.377 | 1.648 |
+| dual-p0 | 16 | 12 | 0.262 | 3.35 | 1.142 | 1.915 |
+| dual-p0 | 16 | **13** | **0.069** | 3.22 | 1.021 | **3.648** |
+
+⇒ s13 的训练末到达率只有同臂另两个 seed 的 **1/3–1/4**，且其 entropy **明显高于**同臂其他 seed
+（3.0–3.6 vs 1.4–1.9）。对照 §5.2：两个非 CBF 臂的 entropy 是**顶到上限 8.027**，而 s13 是**没收敛到低噪声**。
+⇒ 这是「**训练不收敛/不稳定**」，不是「验收时的偶发失败」——**验收崩坏可以从训练日志提前预警**。
+
+**② 三个 `dual-*` / `filter-only` 臂确实带着 proximity 塑形（量化证据）**
+`train/stats` 里逐项奖励可见（n8 为例，末值）：`nominal-paper` 的 `term_obs_log = 0.0000`（权重 0 ⇒ 无贡献），
+而 `obs-proximity` ≈ 0.50–0.58、`dual-p0` ≈ 0.48–0.66、`dual-p1`/`filter-only-p1` 同量级
+⇒ **本批次三个 CBF 臂每条 episode 的回报里约 +0.5 来自 `r_obs_log`（外加 `term_near_slow` ≈ −0.18）**，
+这正是用户要求剥离的对象（见 §8 新批次）。
 
 ---
 
@@ -342,7 +369,6 @@ python np_acceptance_eval.py --num-envs 384 --steps 1500 \
 （凡"A 比 B 好"都附逐 seed 差值与符号一致性；n=3 时 3/3 同号只说明"无反转"，**不构成 p<0.05**）。
 
 ### 6.5 切片 A 结果（2026-09-18 09:37 收口，60/60，0 失败）
-
 产物：`/tmp/navvel_np/eval/eval_final.md`（判定表 + 合并表 + 逐 seed 表 + 3 问作答）、
 `rows_all.json`（60 条原始指标）、`eval_seed_tables.md`（驱动每 seed 落一节）、`<tag>.log` ×60。
 
@@ -401,9 +427,53 @@ python np_acceptance_eval.py --num-envs 384 --steps 1500 \
 - [x] 训练期曲线检查（§5；结论：**没塌缩，但两个非 CBF 臂 std 顶到上限**）
 - [x] 台账修复（§3 问题 7：`np_manifest_rebuild.py` 从磁盘重建，60 档全 ok）
 - [x] 验收驱动 `scripts/np_acceptance_eval.py`（per-spec profile + 按 seed 分组的对比表 + 三 seed 合并；自检通过）
-- [ ] **验收**（§6）：🔴 **被环境阻塞**——2026-09-18 06:16 `unattended-upgrade` 升级驱动栈，CUDA 当前不可用（§6.2）
-- [ ] `dropped_relevant_frac` 在 n=8 / n=16 档上报（K=4 的风险点）
-- [ ] §5.2 的 std 上限问题做**单变量诊断**（先看确定性验收再决定，不许先扫权重）
+- [x] **验收切片 A 完成**（§6.5）：60/60、0 失败；判定 **不通过**，失败在到达率与可撤性、不在安全
+- [x] `dropped_relevant_frac` 在 n=8/n=16 上报：**精确 0，最差 `dropped_step` 0.008 <1% ⇒ K=4 够用**
+- [x] 结论写回 plan `§0.5.31`（含失败与"不可区分"）
+- [x] **新批次：`-noprox` 三臂**（§8）—— 剔离 proximity 塑形，已开训
+- [ ] §5.2 的 std 上限问题做**单变量诊断**（待用户裁决；验收显示确定性到达率不差，但 n16/OFF 不能排除其贡献）
 - [ ] 目视确认 R1（物理圆柱高度是否跟随 per-episode scale）
 - [ ] 导出侧同步（**范围外**，与用户确认后再做）
-- [ ] 结论写回 plan（新开 `§0.5.31`），**包括失败与"无法区分"的结论**
+
+---
+
+## 8. 新批次：`-noprox` 三臂（剥除 obstacle-proximity 塑形）
+
+### 8.1 动机（由 §5.4 的量化证据触发）
+
+三个 CBF 臂（`dual-p0` / `dual-p1` / `filter-only-p1`）的 profile 里带着
+`obstacle.reward_obs_log_weight: 1.5` + `obstacle.reward_near_slowdown_weight: 0.5`，
+而论文的 `r_obstacle` **不含**这个 proximity 塑形项。训练日志的量化证据（§5.4）：这三个臂的
+`train/stats` 里 `term_obs_log` ≈ **+0.5/episode**（另加 `term_near_slow` ≈ −0.18），而论文口径的
+`nominal-paper` 是 **0.0000** ⇒ **三个「论文行」被一个论文里不存在的塑形项混淆了**。
+用户裁决（2026-09-18）：**把该项剥离后重训这三臂**，再出一张新旧对照的测试总表。
+
+### 8.2 用户裁决
+
+| 议题 | 裁决 |
+|---|---|
+| 新臂命名 | **`-noprox` 后缀**：`dual-p0-noprox` / `dual-p1-noprox` / `filter-only-p1-noprox`（旧臂名不改，避免弄断已完成批次的记录） |
+| 训练档位 | **四档全链 `n2→n4→n8→n16`**（每档 10M 帧）——只有链末的 n8/n16 才与旧三臂**可比**（旧臂的 n8/n16 也是链末档） |
+| eval 档位 | **n8 + n16**，`384×1500` 一档，**不跑 `512×600`** |
+
+### 8.3 单变量改法（已断言）
+
+`make_np_profiles.py` 新增三臂，只覆盖两个权重：`reward_obs_log_weight 1.5 → 0.0`、
+`reward_near_slowdown_weight 0.5 → 0.0`。`--check` 新增断言：noprox 臂的两个权重必须为 0
+**且 `reward_collision_edge` 必须仍为 2**（碰撞惩罚属于论文的 `r_obstacle`，不属于被剥离的塑形）。
+
+验证：`diff <(grep -v '^#' 旧) <(grep -v '^#' 新)` 非注释行**只差这两行**；
+重新生成后旧的 20 份 profile **字节未变**（`git status` 只出现 12 个新文件，无 `M`）。
+运行中的 live config 也已核验：`reward_obs_log_weight: 0.0`、`reward_near_slowdown_weight: 0.0`、
+`reward_collision_edge: 2`、`obs layout ... total obs 58`。
+
+### 8.4 开跑记录与计划
+
+- 启动：2026-09-18 **10:17:51**（tmux `np2`），**36 档**（9 链 × 4 档），`--parallel 2`，
+  project `env_design_cyl_noprox`（**独立 project + 独立 logdir**，`np_manifest_rebuild.py` 不会与旧批混），
+  logdir/manifest `/tmp/navvel_np2/`。
+- 预估：每档 ≈350 s（沿用旧批实测）⇒ 36 档 ÷ 2 ≈ **1.8 h**，收口约 **12:00–12:15**。
+- 验收计划：**36 次 eval**（三臂 × {n8,n16} × 3 seed × {ON,OFF}），`384×1500`，串行，≈35 min。
+- 总表：`np_eval_report.py --rows <旧 rows_all.json> <新 rows_all.json>` —— 已改造为
+  **多文件合并 + 臂/档/seed 从数据推导 + `cbf.mode` 从 profile 读取**（不再硬编码臂表），
+  新增"新旧同臂对照（proximity 塑形净效应）"一节（逐 seed 差值 + 符号一致性）。
