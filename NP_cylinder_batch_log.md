@@ -1075,5 +1075,42 @@ self.ep_collision_edges += new_edge.long()
 ⇒ 建议（待你裁决）：把"几何接触"（`clr < 0` 或 `sdf < drone_radius`）与"余量侵入"分开两个计数器；
 加一个**不被 reset 清除**的窗口级碰撞/坠毁计数器（并统计 `term_cause` 各原因的**事件次数**而非"曾经"）。
 
+### 13.6 两个口径问题的代码级答案（2026-09-18）
+
+**Q1：训练/eval 是否允许"碰撞后复活"？**
+
+| | 结论 | 证据 |
+|---|---|---|
+| 一局内 | **不复活** | `soft_respawn: false`（训练与验收同一批 profile）+ `max_collisions: 1` ⇒ 碰撞只置 `terminated`（`nav_vel.py:1309-1322`），`_respawn` 永不被调用 |
+| 一局之后 | **立刻开新的一局**（= 换个位置重飞） | torchrl `_rollout_nonstop` 调的是 `step_and_maybe_reset` → `maybe_reset`（`torchrl/envs/common.py:3769 / 3832`），**与 `auto_reset` 参数无关**；训练侧 `auto_reset=True` 只是把返回的 tensordict 换成重置后的状态（`train.py:175`） |
+| 窗口步数 | **继续累计到 1500 步** | `progress_buf` 每局清零，但 rollout 的 1500 步照跑；env 65 实测 **7 局**（345/449/134/136/152/173/110 步） |
+
+⇒ "eval 侧一个 env 允许重飞多次"是准确的；区别只是"**一局内不存在多命**"。到达也**不**终止（`success_terminate: false`），
+`max_episode_length: 1500` = 窗口长度 ⇒ 窗口内每次重置都来自 碰撞/坠地/出界。
+
+**Q2：`drone_radius=0.1` 是以机体原点为球心的球，还是机体最外缘再外扩 0.1 m？**
+
+**是以机体原点为球心、半径 0.1 m 的球**（你说的"前者"，没问题）：
+`clearances()` 走 `shape_sdf_normal(drone_pos)`，而 `drone_pos = self.drone_state[..., :3]`
+= 机体系原点（`nav_vel.py:1100` → `nav_vel_obstacles.py:424-478`），再减 `(drone_radius + inflation)`。
+本机机体参数（`omni_drones/robots/assets/usd/crazyflie.yaml`）：`arm_lengths = 0.043 m`（四个电机中心到原点）、
+`l = 0.096`、`mass = 0.042 kg`（CFB 带桨保护）⇒ 最外缘（桨尖）距原点约 0.07–0.09 m ⇒ **0.1 m 半径能覆盖螺旋桨**，是保守包络。
+但要注意"保守"叠加了三次：0.1 m 包络 + 0.02 m 膨胀 + **0.05 m 判定余量** ⇒ **机心距圆柱表面 0.17 m 就记一次"碰撞"**，
+此时桨尖离表面仍有约 9 cm ⇒ **不是接触**（任务默认值更宽：`drone_radius=0.15`、`inflation=0.05` ⇒ 0.25 m）。
+
+**Q3（延伸）：eval 的到达率会因此虚高吗？—— 会，而且偏置方向很坏。**
+
+1. `arrival_at[r]` 由 `_AcceptanceCb.arrived[rad] |= (inside[rad] >= HOLD_02)` 决定，**只在窗口开始时清零** ⇒ 它是
+   "P(这只 env 在**任意一条命**里做到)"= 锁存量 `1-(1-p)^k`，**命越多越容易达标**。
+2. **命数恰恰由"死得多快"决定**（碰撞/坠地/出界都结束一条命并换来一次重飞）⇒
+   **越冒失的臂拿到越多重试机会，到达率被抬高** —— 与安全性方向相反。
+3. 同一张表的"严格成功/碰撞数"是**按最后一局**（`_reset_idx` 清零）⇒ 相邻列口径不同、不可互推。
+4. 训练侧的 `stats.arrival` 是 EpisodeStats 在 done 步采样 = **按局**，所以**没有**这个虚高；只有验收侧的锁存量有。
+   两者并列比较（"训练 0.2–0.65 vs 验收 0.9"）本身就是错的。
+
+**可选修法（待裁决）**：**(A)** 回调里检测重置（`progress_buf` 回退 / 每局计数）→ 把 `inside` 清零并单独累计
+"每局到达率 + 局数"；**(B)** eval 改**单命协议**（死后冻结不重置）⇒ 一窗口=一条命，锁存与按局自然一致；
+**(C)** 不改协议，只把 `arrival@0.2` 明确标注为 "any-life" 并同时报告局数。
+
 ⚠️ 回放的两点限制：圆柱**高度按重建那集的随机值**（未记录，纯视觉）；`headless=false`/viewport 路径
 **未在本机验证**（本机无显示环境），需要你在显示器上确认。
