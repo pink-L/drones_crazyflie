@@ -987,11 +987,15 @@ ON 0.380→**0.148**（严格成功 0.362→0.151），而 **OFF 0.807→0.974**
 - 物理含义：`clr` = SDF − (drone_radius 0.1 + inflation 0.02)，阈值 `collision_margin=0.05`。
   即"10 cm 机体球 + 2 cm 缓冲"之外再留 5 cm 判定余量；**真实圆柱表面距离约 0.17 m，没有物理接触**，
   是**裕度擦过**（≤ 数 mm 量级），不是撞毁。
-- 该 env 全程 respawn **6 次**（位置跳回固定初值 `(-2.8,0,0.5)`），而窗口统计 `crash_envs_ever=0`、`oob_envs_ever=0`。
-  `ep_collision_edges` 只有 1 ⇒ 另外 5 次来自 `misbehave = crash | oob`。
-  ⚠️ **仪表盲区（需记住）**：`soft_respawn` 在**同一步内**把状态修好，回调只看得到步末状态，
-  所以 `crash_envs_ever` / `oob_envs_ever` / `prev_in_collision` 对"同跳重生"的事件**会漏计**；
-  只有 `ep_collision_edges` 免疫（`_respawn` 不清它，只清 `life_collision_edges` 与 `prev_in_collision`）。
+- 该 env 全程**回到了固定初值 6 次**（t=345/794/928/1064/1216/1389）。
+  ⚠️ **这不是"复活"**：`soft_respawn: false`（训练与验收的 profile 都是它）⇒ 碰撞只会置 `terminated`，
+  nav_vel 内部**根本不调用** `_respawn`；这 6 次是**整局重置** `_reset_idx`。两项独立证据：
+  (1) 障碍**布局只可能在 `_reset_idx` 里被重采样**（`_respawn` 明确"layout itself is kept"），
+      而记录的 `obj_pos` 恰在同样这 6 步变化；(2) 日志 `episode_len mean=1173 < 1500`。
+  ⇒ 一个 1500 步窗口里该 env 经历了 **7 局**（"一局=一条命"）。
+  ⚠️ 盲区：重置由外层触发（训练 `auto_reset=True`；验收写 `False` 但**实测仍发生重置**，触发点待复核），
+  且它在**同一步内**把状态修好，所以回调只看得到步末状态 ⇒ `crash_envs_ever`/`oob_envs_ever`/`prev_in_collision`
+  对同跳事件**会漏计**。
 
 ### 13.3 新增的两个可选能力（默认关闭，不影响冻结验收口径）
 
@@ -1041,6 +1045,35 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python $BASE headless=true \
 
 已产出（在 `/tmp/navvel_coll/`）：`tail6.mp4`（碰撞特写，已逐帧目视确认无人机+柱子+覆盖数字可见）、
 `overview.mp4`、`topdown.mp4`、`env65b.npz`（忠实轨迹，含四元数）。
+
+### 13.5 碰撞计数的三个测量问题（**回答"判定标准"时发现的**）
+
+判定链（`nav_vel.py:1099-1107`）：
+```python
+clr      = self.obstacles.clearances(drone_state[..., :3])   # 逐槽位表面净空
+dmin     = clr.min(-1)                                       # 全部活动障碍取最小
+in_col   = (dmin < self.obstacle_collision_margin) & finite
+new_edge = in_col & (~self.prev_in_collision)                # ← 只数"上升沿"
+self.ep_collision_edges += new_edge.long()
+```
+`clearances()` 对圆柱走 `sdf(有限圆柱) − (drone_radius + inflation)`；非活动槽位 = +inf。
+按 NP profile 的实际取值（`drone_radius=0.1`、`inflation=0.02`、`collision_margin=0.05`）：
+
+**① "碰撞" ≠ 接触**：判据等价于 **圆柱表面到机心 < 0.17 m**。飞机按 0.1 m 半径球处理，
+0.02 m 是障碍膨胀，**0.05 m 是纯判定余量** ⇒ 距表面约 17 cm 就记一次，比真实接触早 7–12 cm。
+本次那次"碰撞"实测表面距离 ≈0.17 m，属于**擦到判定余量**，不是撞上。
+
+**② 只数上升沿**：持续贴障只记 1 次；离开再进入会再记 1 次；`prev_in_collision` 每局清零。
+
+**③ 计数窗口 ≠ 评估窗口**：`_reset_idx` 会清 `ep_collision_edges`（`nav_vel.py:786`），
+而重置在 rollout 内发生 6 次 ⇒ 报告读到的 `collision_envs/collision_edges` **只覆盖最后一局**，
+不是 1500 步。同理 `arrival_triggered` / `episode_any_arrival` 也是每局清零。
+**但**验收脚本自己的 `_AcceptanceCb.arrived[rad]` 是**锁存**的（只在窗口开始时清零），
+所以 §12 表里的 **「到达@0.2率」= "该 env 在任意一条命里曾连续 20 步进 0.2 m"**，
+而 **「严格成功」= 最后一局到达且零碰撞** —— **相邻两列的时间窗口不同**，这一条必须在表注里写明。
+
+⇒ 建议（待你裁决）：把"几何接触"（`clr < 0` 或 `sdf < drone_radius`）与"余量侵入"分开两个计数器；
+加一个**不被 reset 清除**的窗口级碰撞/坠毁计数器（并统计 `term_cause` 各原因的**事件次数**而非"曾经"）。
 
 ⚠️ 回放的两点限制：圆柱**高度按重建那集的随机值**（未记录，纯视觉）；`headless=false`/viewport 路径
 **未在本机验证**（本机无显示环境），需要你在显示器上确认。
