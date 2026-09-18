@@ -231,13 +231,52 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
 
 ⇒ 本批次的验收需要一个**按 ckpt 的 (arm, level) 逐个换 profile** 的驱动
 （`profiles/NP-<arm>-n<level>`），并且要同时跑两个协议（`512×600` 对齐 + `384×1500` 收口）× ON/OFF。
-**方案（待用户裁决）**：新增 `scripts/np_acceptance_eval.py`（复用 `acceptance_eval.py` 的 spec/`run_one`/汇总，
-只把 profile 变成 per-spec 参数），先只跑**有区分度的切片**回答上面 3 个问题：
+**方案（用户已批准，已实现）**：新增 `scripts/np_acceptance_eval.py`（复用 `acceptance_eval.py` 的 spec 构造与 VRAM 守卫，
+profile 变为 **per-spec**，日志 tag 含 arm+level 以避免撞名，按 seed 串行执行并在每个 seed 收尾时落一张对比表，
+最后合并三 seed 求均值 + 报**种子极差**）。先只跑**有区分度的切片**回答上面 3 个问题：
 
 - **切片 A（先跑）**：n=8（= P3b-1 的 d8 协议，唯一有区分度）+ n=16（诊断档），5 臂 × 3 seed × {ON,OFF}，
   `--num-envs 384 --steps 1500` ⇒ **60 次 eval**（串行，不能并行冷启动多个 Isaac：历史教训）；
 - **切片 B（按需）**：n=2/n=4（低保真，预期饱和）+ `512×600` 对齐列；
 - 必测 `dropped_relevant_frac`（K=4 风险点，n=8 与 n=16 都要报）。
+
+### 6.2 🔴🔴 2026-09-18 08:23 环境事故：系统自动升级驱动，**CUDA 全线不可用**（与本次改动无关）
+
+**现象**：`nvidia-smi` → `Failed to initialize NVML: Driver/library version mismatch`（NVML 库 580.178）；
+torch → `cuda_available=False`，`Error 804: forward compatibility was attempted on non supported HW`。
+
+**证据链（三件套版本错位，升级发生在训练批次结束之后，所以 §5 的训练结果不受影响）**：
+
+| 组件 | 版本 | 来源 |
+|---|---|---|
+| 已加载内核模块 | `580.173.02` | 9/4 00:51 开机时载入（升级前） |
+| 磁盘上 dkms 模块 | `580.178.04` | 升级后（`nvidia-dkms-580-open`） |
+| 用户态 `libcuda` / `libnvidia-ml` | `580.178.04` | 升级后 |
+
+`/var/log/apt/history.log` 2026-09-18 06:16:17–06:18:03：`unattended-upgrade` 把整条 NVIDIA 栈
+（`libnvidia-*`、`nvidia-utils-580`、`nvidia-driver-580-open`、`nvidia-dkms-580-open`、`nvidia-kernel-source-580-open`）
+从 `580.173.02` 升到 `580.178.04`，替换了 `nvidia-firmware-580`；同批还升级了 `libc6` 并写了 `/var/run/reboot-required`。
+新模块已落盘，但**旧模块仍在运行**，用户态（178）与内核态（173）不匹配 ⇒ NVML 拒绝服务、CUDA 报 804。
+
+**影响**：切片 A 的 60 次 eval **一次也跑不了**（不是配置问题）。**没有任何东西丢失**：3 个 seed × 5 臂 × 4 档 = 60 个 ckpt 在盘上、
+`np_chain_manifest.json` 完好、验收驱动已写好并自检通过 ⇒ GPU 一恢复即可一条命令开跑。
+
+**为什么不能在这边修**：需要加载 178 版内核模块，等价于 `rmmod/modprobe nvidia*`（root，且会杀掉使用 GPU 的显示会话）或重启。
+两条路都触碰「不重启服务器」的红线，**必须由用户决定**，我不做特权操作。
+
+**顺带修掉的自身缺陷（已在本机自检）**：`np_acceptance_eval.py` 的 GPU 预检原先直接 grep `nvidia-smi` 输出，
+会把 NVML 的报错文本当成 PID 而误报「GPU is busy」。现在预检区分三种状态并在故障时给出精确诊断：
+
+```
+[np_eval] FATAL: NVML is broken - nvidia-smi says:
+    Failed to initialize NVML: Driver/library version mismatch
+  loaded kernel module = 580.173.02, userspace libcuda = 580.178.04
+```
+
+**教训（值得留档）**：① `unattended-upgrade` 会在训练任务之间悄悄换掉整条驱动栈——批次跑完与开验收之间必须做一次 GPU 预检，
+而不是假定「刚才还好」；② 任何 GPU 忙检测都必须解析**数字 PID**并单独处理 NVML 故障，否则会把环境故障误报成资源占用；
+③ 报「CUDA 不可用」时必须同时打印**内核模块版本 vs 用户态库版本**，否则无法与「卡被别人占用/显存不足」区分；
+④ 自检必须在**真实环境**下跑一次（这次靠 `--preflight-only` 才发现守卫本身有 bug）。
 
 ---
 
@@ -246,7 +285,8 @@ per-clone `xformOp:scale`。规避方式是**把物理 prim 基准高度设为�
 - [x] 训练批次 **60 档**（2026-09-18 01:49 完成，60/60 产出 ckpt）
 - [x] 训练期曲线检查（§5；结论：**没塌缩，但两个非 CBF 臂 std 顶到上限**）
 - [x] 台账修复（§3 问题 7：`np_manifest_rebuild.py` 从磁盘重建，60 档全 ok）
-- [ ] **验收**（§6）：需先做 per-ckpt profile 的驱动（`acceptance_eval.py` 默认 A0 球堆口径不兼容）
+- [x] 验收驱动 `scripts/np_acceptance_eval.py`（per-spec profile + 按 seed 分组的对比表 + 三 seed 合并；自检通过）
+- [ ] **验收**（§6）：🔴 **被环境阻塞**——2026-09-18 06:16 `unattended-upgrade` 升级驱动栈，CUDA 当前不可用（§6.2）
 - [ ] `dropped_relevant_frac` 在 n=8 / n=16 档上报（K=4 的风险点）
 - [ ] §5.2 的 std 上限问题做**单变量诊断**（先看确定性验收再决定，不许先扫权重）
 - [ ] 目视确认 R1（物理圆柱高度是否跟随 per-episode scale）
