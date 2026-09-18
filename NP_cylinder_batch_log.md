@@ -954,3 +954,93 @@ ON 0.380→**0.148**（严格成功 0.362→0.151），而 **OFF 0.807→0.974**
    （`dual-p0-noprox`）⇒ 两个 level 都 <0.85 ⇒ **仍不能撤 filter**（与 §11.5 一致）。
 7. `nominal-paper` / `obs-proximity` 的 ON 与 OFF 行**逐位相同**（0.462/0.462、8/8 碰撞），
    这是 `cbf.mode=none` 的必然结果，也**反证了 ON/OFF 流程没有引入额外差异**（内部一致性检查通过）。
+
+---
+
+## 13. 用 Isaac Sim 渲染这次碰撞（2026-09-18）——**边跑边渲染不保真，必须回放**
+
+### 13.1 结论先行
+
+`dual-p1-noprox` n16 s12 ON 那 **1 次碰撞**已经定位并渲染出来了，但**不能用"跑的时候顺便录"**的方式得到：
+本机实测**渲染会扰动仿真**，而这次碰撞恰好是 5 µm 级阈值事件，一扰动就消失。
+
+| 方式 | `arrival_at@0.2` | 碰撞数 | 说明 |
+|---|---|---|---|
+| 只导出轨迹（忠实基线） | **0.9115** | **1** | 本节的基准 |
+| 导出 + 每帧 `sim.render()` | 0.9141 | **0** | 碰撞丢失 |
+| 导出 + 不主动 render（只取帧） | 0.9089 | **0** | 仍丢失：`Camera.initialize()` 内部本身会 render 两次 |
+
+根因：`SimulationContext.render()` 内部会 `self._app.update()`，并在 playing 时调用
+`update_articulations_kinematic()` + physx fabric 的 `force_update`。
+
+**因此采用「运动学回放」**：物理完全不推进，把**记录到的真实轨迹**逐帧写进场景再渲染
+（`drone.set_world_poses` → 直接写 `_physics_view.set_transforms`），画面与记录数据**按构造一致**，
+并且帧率与仿真解耦 ⇒ 才能做慢放。
+
+### 13.2 这次碰撞到底是什么
+
+- 定位：**env 65**（384 个环境里唯一记满 1 次 edge 的），`seed=12`、`set_seed=1012`、n16、ON。
+- **发生在最后一次 episode 的最后一帧**：回调对 1500 步只触发 **1499** 次（后一步不覆盖），
+  逐步记录里 `ep_collision_edges` 恒为 0，而收尾读数是 1 ⇒ 事件落在未被记录的那一步。
+- 轨迹证据：该 episode（记录 1389..1498）净空**线性下降** 0.0100 m/步，
+  0.165 → … → 0.0550（t=1498），外推 0.0450 < **0.05** ⇒ 最后一步越界。
+- 物理含义：`clr` = SDF − (drone_radius 0.1 + inflation 0.02)，阈值 `collision_margin=0.05`。
+  即"10 cm 机体球 + 2 cm 缓冲"之外再留 5 cm 判定余量；**真实圆柱表面距离约 0.17 m，没有物理接触**，
+  是**裕度擦过**（≤ 数 mm 量级），不是撞毁。
+- 该 env 全程 respawn **6 次**（位置跳回固定初值 `(-2.8,0,0.5)`），而窗口统计 `crash_envs_ever=0`、`oob_envs_ever=0`。
+  `ep_collision_edges` 只有 1 ⇒ 另外 5 次来自 `misbehave = crash | oob`。
+  ⚠️ **仪表盲区（需记住）**：`soft_respawn` 在**同一步内**把状态修好，回调只看得到步末状态，
+  所以 `crash_envs_ever` / `oob_envs_ever` / `prev_in_collision` 对"同跳重生"的事件**会漏计**；
+  只有 `ep_collision_edges` 免疫（`_respawn` 不清它，只清 `life_collision_edges` 与 `prev_in_collision`）。
+
+### 13.3 新增的两个可选能力（默认关闭，不影响冻结验收口径）
+
+1. **`+traj_dump=<npz> [+traj_dump_envs=[65]]`** —— 逐步导出 `pos/vel/quat/rpos/clr/incol/edges/interv/pfil`
+   + 该 env 的**逐步障碍布局**（`obj_pos/obj_radius/obj_active`）。
+   只有只读的 `detach().cpu()`，所以带它的运行与不带**逐位一致**（已用 `arrival_at`/`layout_fp` 验证）。
+2. **`+video_out=<mp4>` + `+replay_npz=<npz>`** —— 按记录轨迹回放渲染；启动时**校验重建场景与记录首集布局
+   完全一致**（实测 `max|Δpos| = 0.000000 m`），不一致直接报错而不是默默画另一个世界。
+   布局**每次 respawn 都会重采样**（本次 7 套），故回放会在变化步用记录值 `commit_layout` 写回。
+
+同时发现/记录：`Camera.get_images()` 在本机 Isaac 5.1 上不可用（`get_data()` 返回 numpy/warp 两种形态，
+`warp.to_torch` 会抛错），改为直接读注解器；**不需要** `--enable_cameras`；NavVel 场景**没有灯光**，
+无灯时渲染全黑（与"管线没跑"无法区分），故录像模式自带 dome+distant 灯。
+
+### 13.4 命令（自跑）
+
+```bash
+cd /home/lz/lzspace/drones/OmniDrones/scripts
+CK=wandb/run-20260918_163524-dsod0qrv/files/checkpoint_final.pt   # dual-p1-noprox n16 s12 的 +20M ckpt
+BASE='eval_ckpt.py task=profiles/NP-dual-p1-noprox-n16 algo=ppo wandb.mode=disabled
+      task.env.num_envs=384 task.fixed_init=[-2.8,0.0,0.5] task.fixed_target=[2.8,0.0,1.0]
+      +checkpoint='$PWD'/'$CK' +rollout_steps=1500 +runtime_filter=true +cbf_diag=true
+      +model_id=np-dual-p1-noprox-n16-s12 seed=12 +set_seed=1012'
+
+# A) 忠实轨迹导出（若 /tmp 被清空，先跑这个；期望 arrival_at@0.2=0.9115 且 collision_envs=1）
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python $BASE headless=true \
+  +traj_dump=/tmp/navvel_coll/env65b.npz "+traj_dump_envs=[65]"
+
+# B) 碰撞特写回放（110 帧慢放）→ 然后 xdg-open /tmp/navvel_coll/tail6.mp4
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python $BASE headless=true \
+  +video_out=/tmp/navvel_coll/tail6.mp4 +video_env=65 +replay_npz=/tmp/navvel_coll/env65b.npz \
+  +replay_start=1389 +replay_end=1499 +replay_stride=1 +video_fps=15 \
+  +video_chase=1 "+video_chase_off=[-1.8,2.4,1.6]" +video_focal=14 \
+  +video_dome=400 +video_sun=1200 "+video_cam=[0,0,3]" "+video_look=[0,0,0.5]"
+
+# C) 全过程回放（0..1498 每 5 步一帧 = 300 帧 / 15 s）
+… 同上，把 B 的窗口换成 +replay_start=0 +replay_end=1499 +replay_stride=5 +video_fps=20
+
+# D) 在显示器上实况看（GUI 窗口，同时把 viewport 录下来）
+… headless=false +video_use_viewport=1   （其余同 B；回放时 viewport 由追拍驱动）
+# E) 浏览器推流：+enable_livestream=true +livestream_port=8211 headless=false → https://<ip>:8211/streaming
+```
+
+可调旋钮：`video_cam`/`video_look`（世界系，会加该 env 的偏移）、`video_focal`（**小=广角**，
+不设会沿用很窄的默认 FOV，这正是前几次"像在柱子里面"的原因）、`video_chase`/`video_chase_off`、
+`video_dome`/`video_sun`（NavVel 无灯，过亮会把浅色柱子曝成一片白）、`replay_start/end/stride`、`video_fps`。
+
+已产出（在 `/tmp/navvel_coll/`）：`tail6.mp4`（碰撞特写，已逐帧目视确认无人机+柱子+覆盖数字可见）、
+`overview.mp4`、`topdown.mp4`、`env65b.npz`（忠实轨迹，含四元数）。
+
+⚠️ 回放的两点限制：圆柱**高度按重建那集的随机值**（未记录，纯视觉）；`headless=false`/viewport 路径
+**未在本机验证**（本机无显示环境），需要你在显示器上确认。

@@ -2502,6 +2502,28 @@ s11 与 s12/s13 的 rows 按 seed **天然不撞键** ⇒ 合并 36 条出 3-see
 
 ---
 
+### 0.5.36 用 Isaac Sim 渲染这次碰撞（**2026-09-18**）——渲染会扰动仿真，改用运动学回放
+
+**位置**：`NP_cylinder_batch_log.md` **§13**（含定位、机制、命令、旋钮、限制）。
+
+**要点**：
+1. **边跑边渲染不保真**（本机实测）：忠实基线 `arrival_at@0.2=0.9115` / 1 次碰撞；
+   加每帧 `sim.render()` → `0.9141` / **0 次**；连"不主动 render 只取帧"也 → `0.9089` / **0 次**
+   （`Camera.initialize()` 内部自己会 render 两次）。根因：`SimulationContext.render()`
+   内部 `self._app.update()` + `update_articulations_kinematic()` + physx fabric `force_update`。
+   ⇒ 这次是 **5 µm 级阈值事件**，任何扰动都会翻转，只能用**运动学回放**（不推进物理，把记录轨迹逐帧写回场景）。
+2. **碰撞定位**：env 65（384 中唯一）、`dual-p1-noprox` n16 s12 ON、**最后一次 episode 的最后一帧**
+   （回调 1500 步只触发 1499 次，事件落在未覆盖的那一步）。净空线性下降 0.0100 m/步 → 0.0550 → 外推 0.0450 < 0.05。
+   物理上是**裕度擦过**（真实圆柱表面距离 ≈0.17 m，无物理接触），不是撞毁。
+3. **新仪表盲区**：`soft_respawn` 在同一步内修好状态，所以 `crash_envs_ever`/`oob_envs_ever`/`prev_in_collision`
+   会**漏计"同跳重生"事件**（该 env 实际 respawn 6 次，而窗口统计 crash=0、oob=0）；只有 `ep_collision_edges` 免疫。
+4. **新增可选能力**（默认关闭、不改冻结口径）：`+traj_dump=` 逐步轨迹/布局导出（只读，逐位一致）、
+   `+video_out=` + `+replay_npz=` 回放渲染（启动校验重建场景与记录一致，实测 `max|Δpos|=0.000000 m`）。
+   顺带记录：`Camera.get_images()` 在 Isaac 5.1 本机不可用（需直接读注解器）；**不需要** `--enable_cameras`；
+   NavVel 场景**无灯光**，必须自加（否则全黑）。
+
+---
+
 
 ## 1. 当前版本现状
 ### 1.1 交付物与谱系（已核实）
