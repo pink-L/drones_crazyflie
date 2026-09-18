@@ -1112,5 +1112,49 @@ self.ep_collision_edges += new_edge.long()
 "每局到达率 + 局数"；**(B)** eval 改**单命协议**（死后冻结不重置）⇒ 一窗口=一条命，锁存与按局自然一致；
 **(C)** 不改协议，只把 `arrival@0.2` 明确标注为 "any-life" 并同时报告局数。
 
+---
+
+## 14. 单命窗口协议（`task.single_episode_per_window=true`，2026-09-18）
+
+### 14.1 为什么要加
+
+默认语义（训练/验收同一批 profile）是：**一局 = 一条命，撞了结束这局，随后立刻开新的一局**，
+而一个 1500 步的验收窗口里同一 env 会飞**多局**（实测某 env 7 局）。验收脚本的 `arrived[]` 又是
+**跨局锁存**的 ⇒ 到达率被"多给几次机会"抬高，且**越冒失的臂重试越多**（方向与安全性相反）；
+碰撞数则因 `_reset_idx` 清零而**只统计最后一局**。两个偏置方向相反，使旧总表的两列都不可信。
+
+### 14.2 开关做了什么（默认关闭，仅 eval 打开）
+
+`omni_drones/envs/single/nav_vel.py`：`single_episode_per_window` →
+① latched `life_ended`：本 env **唯一那局**结束后**不再上报 terminated/truncated**，
+使 torchrl 的 `step_and_maybe_reset` 无法在窗口内重开它（一窗口 = 一局 = 一条命，上限 `max_episode_length`）；
+② 冻结：结束后动作置零（低层控制器原地悬停），且把该 env 排除在到达/碰撞判定与 `ep_min_clearance` 之外；
+③ `term_cause` 改为按"本步刚结束"门控（放在抑制**之前**），所以**每 env 的终止原因在窗口内保留**。
+`scripts/eval_ckpt.py`：验收累加器全部按 `life_ended` 门控；`[eval_metrics]` 新增
+`single_episode_per_window` / `envs_ended` / `cause_crash|oob|collide|timeout|arrived_end`。
+
+### 14.3 验证（`dual-p1-noprox` n16 s12 ON，384 局）
+
+| 自检项 | 结果 |
+|---|---|
+| 窗口内是否还有重置 | **无**：`episode_len mean=std=0, min=max=**1500**`（旧口径 mean 1173 / min 18） |
+| 原因是否守恒 | **384** = collide 218 + arrived_end 147 + oob 15 + crash 4（timeout 0） |
+| 交叉验证 | `cause_collide 218` **恰等于** `collision_envs 218`；`joint_success 149` ≈ env 自身按局到达 149 |
+| 冻结机污染 | 修前 `min_clearance_global_min = -0.41 m`（伪穿透），修后 **0.0245 m** |
+
+### 14.4 ⚠️ 新旧口径对照：**旧总表的到达列被抬高 ~2.4 倍，碰撞列被低估 ~200 倍**
+
+| 指标 | 旧口径（多局 + 锁存） | **单命窗口** |
+|---|---|---|
+| 到达@0.2 | **0.9115** | **0.3854** |
+| 到达@0.5 | 0.9271 | 0.3932 |
+| 严格成功（到达∧零碰） | 346 / 384 = 0.901 | **149 / 384 = 0.388** |
+| 碰撞环境 / 碰撞事件 | **1 / 1** | **218 / 218** |
+| 首达步数（n） | 541.8 (346) | 537.1 (149) |
+
+⇒ **§12 总表里所有"到达@0.2率 / 严格成功 / 总碰撞"列都是旧口径**，"ON ≥0.85"与"0 碰撞"这两条门槛
+是在被抬高的到达率和被低估两个数量级的碰撞数上判定的 ⇒ **需要用单命协议重跑 96 档（8 臂 × 3 seed × 2 mode × 2 level，≈80 min）重建总表**，之后 §11/§12 的结论需按新口径复核。
+训练侧语义**未变**（同一批 profile，`single_episode_per_window` 默认 false），所以已训好的权重不受影响。
+
 ⚠️ 回放的两点限制：圆柱**高度按重建那集的随机值**（未记录，纯视觉）；`headless=false`/viewport 路径
 **未在本机验证**（本机无显示环境），需要你在显示器上确认。
