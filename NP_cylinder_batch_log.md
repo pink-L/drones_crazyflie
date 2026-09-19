@@ -1460,3 +1460,74 @@ arrival 低是**噪声水平的伪影，而非其奖励/观测设计的判决**�
 若仍顶在上限，则说明是奖励梯度太弱压不住熵，需改 clamp 上界（把它变成 cfg 项，2 行改动）。
 **在此之前不应据 §16 判定这两臂的奖励/观测设计优劣**。
 
+
+---
+
+## 19. 三项诊断与日间计划（2026-09-19 上午）
+
+### 19.1 退火臂 10M 档（D 阶段）已经给出判决性结果
+
+C 阶段 36/36 档在 **02:48** 全部完成（单档 440 s），D 阶段 03:08 完成单命验收。3 seed 汇总：
+
+| 臂 | n | ON arrival@0.2（3 seed） | ON 均值 | OFF 均值 | 判读 |
+|---|---|---|---|---|---|
+| `fo-pann-noprox` | 8 | 0.620 / 0.562 / 0.638 | **0.607** | 0.141 | **全场 n8 ON 最佳**（§16 最佳 0.602）；OFF 同步抬升 |
+| `fo-pann-noprox` | 16 | 0.531 / 0.112 / 0.346 | 0.330 | 0.087 | seed 方差大 |
+| `dual-pann-noprox` | 8 | 0.073 / 0.213 / 0.547 | 0.278 | 0.066 | 塌陷倾向 |
+| `dual-pann-noprox` | 16 | 0.023 / 0.190 / 0.443 | 0.219 | 0.026 | **复现 P3 轮 `P3-dual-pann-d8` ON 0.094 的塌陷 ⇒ 判决 2 成立** |
+| `fo-pannlate-noprox` | 8 | 0.466 / 0.323 / 0.357 | 0.382 | 0.214 | 晚退火：ON 降、**OFF 升** ⇒ 判决 3 方向有支持 |
+| `fo-pannlate-noprox` | 16 | 0.294 / 0.055 / — | 0.175 | 0.160 | 同上 |
+
+**要点**：三臂 OFF 仍只有 0.07–0.21（§16 最好的 OFF 是 `nominal-paper` 0.237）⇒
+**退火显著提高了 ON，但没有解除 filter 依赖**。双命栏里 `hybrid + anneal` 再次塌陷，
+所以"退火"这条路只有 `filter_only + anneal` 值得继续。
+
+### 19.2 `env_design_stddiag` 三个 run 全崩的根因：我漏传 `--init-ckpt`
+
+`train_batch.py:211` 的 `--init-ckpt` **有默认值 `DEFAULT_INIT`**（写死指向 2026-09-09 的旧
+run ckpt，观测维 **62**）。E2 的命令没有显式传该参数，于是它被当作"warm start"加载进
+`nominal-paper`（观测维 **58**）：
+
+```
+RuntimeError: Error(s) in loading state_dict for PPOPolicy:
+  size mismatch for actor.module.0.module.0.0.weight: [256, 62] vs [256, 58]
+```
+
+→ Isaac 段错误 `exit=-11`，3 个 seed 各在 **27 s** 内崩溃、`ckpt=NONE`。
+**决定：原设计不重跑**（coef=0 时日志里的熵恒为 0，无法回答"噪声是否饱和"，已由 §18 的
+CPU 直读 `actor_std` 取代）；改跑**修正版单变量对照**（S 批，从零 + `entropy_coef=0.0`）。
+`DEFAULT_INIT` 这个静默陷阱本身要修（`--init-ckpt from-scratch`）。
+
+### 19.3 "训练步数太短"这一假设需要修正（三条例证）
+
+1. §16 的 60 个训练日志里 **59 个真训到了 9.xM 帧**（唯一例外 `nominal-paper_s11_n2` 只到
+   32768，无报错痕迹）⇒ 阶段 B 的成绩不是"没训完"造成的。
+2. 链是**逐档 warm-start**（`np_chain_batch.py` 只在第一档用 init-map），所以 n16 档的
+   **累计训练量已经是 40M**（n2→n4→n8→n16 课程），而 D 阶段正是在 n8/n16 上验收的
+   ⇒ "多训到 40M"对 n16 已经发生过，效果仍然不好。**"每个 run 只有 10M"是单次启动的帧数，
+   不等于该难度上的累计帧数**——这两者必须分开说。
+3. NP 全系列（§16 的 60 档与退火臂）用的都是 `algo.entropy_coef=0.05`，是 `PPOConfig`
+   默认值 0.001 的 **50 倍**。这给 §18 的噪声饱和提供了根因：奖励梯度最弱的两臂被熵正则
+   推到 std 上限（1.8）。
+
+⇒ 对 `nominal-paper` / `obs-proximity`，续训**不会**有用，必须先修噪声（S 批正在测）；
+对 6 个健康臂，"**同难度**多训"是唯一还没被排除的解释，值得做，但应限定 n8/n16 两档。
+
+### 19.4 新发现并修复的 driver 缺陷：`run-suffix` 传参
+
+`np_chain_batch.py` 给子链传后缀时用的是两个独立 argv（`"--run-suffix", "-ext30M"`），
+而**以 `-` 开头的值会被孩子的 argparse 当成选项** ⇒ 子链一律 `rc=2`。实测后果：36 档的
+网格在 **1 秒内全部"完成"**、0 档产出 ckpt，而父进程 rc=0（看起来像成功）。
+已修：孩子收到单 token `--run-suffix=<value>`；本次同时把后缀改成 `_ext30M` / `_e0` 做双保险。
+
+### 19.5 日间链（已启动 09:39，GPU 全程串行）
+
+| 段 | 内容 | 规模 | 预计 |
+|---|---|---|---|
+| S | `entropy_coef=0.05→0.0` 单变量对照（nominal-paper / obs-proximity，n2，从零），跑完直接读 `actor_std` | 6 档 | ~25 min |
+| R8 | 退火 3 臂 **同难度** +30M（n8，从各档 10M ckpt 起） | 9 档 | ~1.9 h |
+| R16 | 同上（n16） | 9 档 | ~1.9 h |
+| V | 合并 manifest 后单命 eval 验收（n8/n16 × 3 臂 × 3 seed，ON/OFF） | 36 次 | ~30 min |
+
+日志：`/tmp/navvel_pann_ext/run.log`（总）、`chain.log`/`chain_n8.log`/`chain_n16.log`、
+`eval.log`；S 段结果 `/tmp/navvel_std2/std_probe_e0.md`。
