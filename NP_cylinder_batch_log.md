@@ -1531,3 +1531,45 @@ CPU 直读 `actor_std` 取代）；改跑**修正版单变量对照**（S 批，
 
 日志：`/tmp/navvel_pann_ext/run.log`（总）、`chain.log`/`chain_n8.log`/`chain_n16.log`、
 `eval.log`；S 段结果 `/tmp/navvel_std2/std_probe_e0.md`。
+
+---
+
+## 20. 训练一律单 seed + eval 侧解耦（2026-09-19 下午，用户决策）
+
+### 20.1 训练只跑一个 seed
+
+用户决定：训练一律单 seed，以节省时间。已把两个训练 driver 的 `--seeds` 默认值从
+`[11, 12, 13]` 改为 `[11]`（`np_chain_batch.py:164`、`train_batch.py:205`）。
+需要 3 seed 复现时显式传 `--seeds 11 12 13` 即可，默认值不再替用户做这个决定。
+
+### 20.2 eval 侧解耦：`--eval-seeds`（同一个 ckpt × 多个布局）
+
+原来 eval 把**布局 seed 与 checkpoint 绑在同一个数字上**（`ckpt_of[(arm, seed, lv)]` +
+`set_seed = 1000 + seed`）⇒ 训练只剩 1 个 seed 时，评估也就只剩 **1 个布局**。而 §9 已经证明
+不同布局会让结论翻转，单布局的评估不足以支撑结论。
+
+新增 `--eval-seeds`：
+
+```
+np_acceptance_eval.py --seeds 11 --eval-seeds 11 12 13 ...   # 用 s11 的 ckpt 跑 1011/1012/1013 三个布局
+```
+
+- 代价放在**便宜的一侧**：训练只花 1 份 GPU 时间，离散度在 eval 侧测量。
+- **默认路径行为不变**（布局 seed == 训练 seed），表格/行键/报告标题仍以"布局 seed"为索引，
+  报告头会额外注明策略来自哪个训练 seed，避免将来误读为"三个不同策略"。
+- 验证方式：`--plan` 预览显示 `6 evals = 1 arms x 1 levels x 3 layouts`，且三行 spec 指向
+  **同一个 run 目录**（`run-20260917_225716-8v5s1tzl`）⇒ 确为同一 ckpt。
+- 顺手修正：`plan()` 之前只按 `a.seeds` 预览，已被改成按布局 seed 预览，避免 dry-run 与实际
+  执行不一致。
+
+### 20.3 E 链收敛为单 seed（16:09，零浪费）
+
+E 链 16:02 以 3 seed 启动，16:09 发现时只跑到 s11 的 n4，s12/s13 还在队列里 ⇒ 处理方式是
+**杀掉调度器、让 s11 的两条子链自己跑完**（子链不随父进程退出，实测存活）。s12/s13 因此不会
+再被启动，已完成的 405 s 训练全部保留。收尾由 `watch_s11.sh` 自动完成：等 s11 两条链结束 →
+合并 child manifest → 用 `--eval-seeds 11 12 13` 在 n8/n16 上做单命 eval。
+
+### 20.4 后续约定
+
+- 新训练默认单 seed（11）；需要 3 seed 时显式写 `--seeds 11 12 13`。
+- 新实验的评估一律带 `--eval-seeds 11 12 13`（或更多布局），以免落进单布局的病态陷阱。
