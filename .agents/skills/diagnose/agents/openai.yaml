@@ -1,0 +1,4 @@
+interface:
+  display_name: "Diagnose"
+  short_description: "Find root causes before making fixes"
+  default_prompt: "Use $diagnose to reproduce, minimize, and root-cause this code or training failure before proposing a fix."

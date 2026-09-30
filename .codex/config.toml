@@ -1,0 +1,16 @@
+# Main / orchestrator model.
+model = "gpt-6-astra"
+model_reasoning_effort = "high"
+
+[features]
+multi_agent = true
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 6
+
+# Safe fallback for an unspecified child agent.
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "medium"
+
+interrupt_message = true

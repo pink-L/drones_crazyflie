@@ -1,0 +1,4 @@
+interface:
+  display_name: "Drones Crazyflie Context"
+  short_description: "Project-specific NavVel and Crazyflie context"
+  default_prompt: "Use $drones-crazyflie-context to map the relevant architecture, files, configs, and validation path before changing this drones repository."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "TDD"
+  short_description: "Test-first coverage for Python and Torch behavior"
+  default_prompt: "Use $tdd to choose the lowest-cost test layer and implement test-first regression coverage for this change."

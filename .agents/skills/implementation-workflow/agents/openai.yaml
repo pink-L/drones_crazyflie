@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implementation Workflow"
+  short_description: "Plan, implement, test, and review changes"
+  default_prompt: "Use $implementation-workflow to implement this repository change with targeted verification and regression evidence."
